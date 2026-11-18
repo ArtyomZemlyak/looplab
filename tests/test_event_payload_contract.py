@@ -255,11 +255,12 @@ _STORE_PROBE_PAYLOADS = {
     "fork": {"from_node_id": 0, "generation": 0},
     "llm_usage": {"usage_id": "u-probe", "calls": 1, "cost": 0.25},
     "node_concepts": {"node_id": 0, "generation": 0, "concepts": ["loss/focal"]},
+    "metric_behavior_scan": {},  # exact valid native receipt is reconstructed from the prefix below
     "plan": {"phases": []},
 }
 
 
-def _raw_state_after(etype=None, payload=None) -> str:
+def _raw_state_after(etype=None, payload=None, *, include_event=True) -> str:
     """The RAW accumulated state (no post-pass) after a one-node prefix plus one probe row."""
     from looplab.core.models import Event
     from looplab.events.replay import FoldCursor
@@ -268,7 +269,16 @@ def _raw_state_after(etype=None, payload=None) -> str:
             ("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
                               "idea": {"operator": "draft", "params": {}}, "code": "",
                               "files": {}, "generation": 0})]
-    if etype is not None:
+    if etype == 'metric_behavior_scan':
+        # Digest validation is opaque to the AST whole-payload census. Give the marker a VALID
+        # post-terminal receipt so refusal of the unknown key is meaningful, not an empty probe.
+        from looplab.core.metric_behavior import metric_behavior_scan
+        rows.append(('node_evaluated', {'node_id': 0, 'metric': .5}))
+        prefix = FoldCursor()
+        prefix.extend(Event(seq=i, ts=float(i + 1), type=t, data=d) for i, (t, d) in enumerate(rows))
+        receipt = metric_behavior_scan(prefix._state.nodes[0], prefix._state.nodes.values())
+        payload = {**receipt, **(payload or {})}
+    if etype is not None and include_event:
         rows.append((etype, payload))
     cursor = FoldCursor()
     cursor.extend(Event(seq=i, ts=float(i + 1), type=t, data=d) for i, (t, d) in enumerate(rows))
@@ -313,9 +323,8 @@ def test_every_type_the_scan_nominates_is_decided_by_an_informative_probe(store_
         f"nominated but undecided — add a minimal valid probe row: "
         f"{sorted(needed - set(_STORE_PROBE_PAYLOADS))}; probe rows nothing needs: "
         f"{sorted(set(_STORE_PROBE_PAYLOADS) - needed)}")
-    reference = _raw_state_after()
     refused = sorted(etype for etype, payload in _STORE_PROBE_PAYLOADS.items()
-                     if _raw_state_after(etype, payload) == reference)
+                     if _raw_state_after(etype, payload) == _raw_state_after(etype, include_event=False))
     assert not refused, (
         f"these probe payloads are refused by their handler, so they cannot decide storage: "
         f"{refused}")
@@ -373,6 +382,7 @@ def _consumed_request_fields() -> dict[str, frozenset[str]]:
     from looplab.serve.control_validation import _INJECT_IMPORT_FIELDS
 
     return {
+        "claim_reviewed": frozenset({"id", "premise_ids", "assessment"}),
         "comment_edited": frozenset({"expected_version"}),
         "comment_resolution_changed": frozenset({"expected_version"}),
         "inject_node": frozenset(set(_INJECT_IMPORT_FIELDS) | {"pre_stages"}),

@@ -109,6 +109,65 @@ def effective_eval_spec(engine) -> dict:
     return with_eval_timeout(es, getattr(engine, "_eval_timeout_override", None))
 
 
+def run_dir_evaluator_digest(run_dir, *, run_uid: Optional[str] = None) -> Optional[str]:
+    """Current canonical evaluator digest derived from `run_dir/task.snapshot.json`, or None."""
+    from pathlib import Path
+    from looplab.adapters.tasks import load_task
+    from looplab.core.evaluator_identity import evaluator_digest_from_specs, protocol_data_content
+
+    if run_dir is None:
+        return None
+    rd = Path(run_dir)
+    snap = rd / "task.snapshot.json"
+    if not snap.is_file():
+        return None
+    try:
+        task = load_task(snap, existing_run=True)
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    es = task.eval_spec() if callable(getattr(task, "eval_spec", None)) else {}
+    rs = task.repo_spec() if callable(getattr(task, "repo_spec", None)) else {}
+    assets = task.assets() if callable(getattr(task, "assets", None)) else {}
+    return evaluator_digest_from_specs(
+        eval_spec=es if isinstance(es, dict) else {},
+        repo_spec=rs if isinstance(rs, dict) else {},
+        assets=assets if isinstance(assets, dict) else {},
+        data_content=protocol_data_content(rd, run_uid=run_uid),
+    )
+
+
+def engine_evaluator_digest(engine, *, run_uid: Optional[str] = None) -> Optional[str]:
+    """Current evaluator digest for `engine`, preferring on-disk snapshot when present so races with
+    stopped/interleaved task or protected-file amendments are caught before launch."""
+    from pathlib import Path
+    from looplab.core.evaluator_identity import evaluator_digest_from_specs, protocol_data_content
+
+    rd = getattr(engine, "run_dir", None)
+    if rd is not None and (Path(rd) / "task.snapshot.json").is_file():
+        return run_dir_evaluator_digest(rd, run_uid=run_uid)
+    es = getattr(engine, "_eval_spec", None)
+    rs = getattr(engine, "_repo_spec", None)
+    assets = getattr(engine, "_assets", None)
+    return evaluator_digest_from_specs(
+        eval_spec=es if isinstance(es, dict) else {},
+        repo_spec=rs if isinstance(rs, dict) else {},
+        assets=assets if isinstance(assets, dict) else {},
+        data_content=protocol_data_content(Path(rd) if rd is not None else None, run_uid=run_uid),
+    )
+
+
+def launch_evaluator_error(engine, node, state=None) -> Optional[dict]:
+    """Fail-closed pre-dispatch check for a node carrying `expected_evaluator_digest`."""
+    from looplab.core.evaluator_identity import evaluator_mismatch_detail
+
+    expected = getattr(node, "expected_evaluator_digest", None)
+    if expected is None:
+        return None
+    uid = getattr(state, "run_uid", None) or None
+    current = engine_evaluator_digest(engine, run_uid=uid)
+    return evaluator_mismatch_detail(expected, current)
+
+
 def effective_max_eval_timeout(engine) -> float:
     """The clamp an AGENT-requested eval timeout meets: `max_eval_timeout`, LIFTED to the operator's
     live `budget_extend{eval_timeout}` when that is larger.

@@ -2331,7 +2331,7 @@ guard (4 failures) and by narrowing the storage-fault translation to `TimeoutErr
 >
 > *Closed 2026-09-29: here stood `structured-claims-keyword-retirement`. The retired `structured=` keyword is deleted from all seven projection signatures (`claims_assessments.claim_assessments`, `claims.claims_for_memory` / `atlas_for_memory`, `claims_retrieval.cross_run_retrieve` / `portfolio_atlas`, `claim_steward.claim_curation_snapshot` / `steward_claims`) and from every caller in one change — the cross-run routes, `tools/cross_run_tools.py`, `engine/curation_protocol.py`, the CLI and 49 test call sites. Passing it is now a TypeError, so nothing can ask for the lean identity and be handed the structured one in silence (`tests/test_claim_key.py`). The CLI's `claims --structured` FLAG stays accepted and inert: a shell script's contract, not a Python signature.*
 >
-> **OPEN[structured-claims-setting-retirement]** `Settings.cross_run_structured_claims` still parses and is read by nothing; deleting it (and its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row, calibration-profile row, catalogue row and counts) moves `SPECULATION_CALIBRATION_PROFILE_DIGEST` and revokes issued calibration receipts (ENG3-08 phase 2). proof:present:cross_run_structured_claims@looplab/core/config.py
+> *Closed 11 November 2026 — phase2 isolated implementation. The inert Settings field, legacy-default injection, calibration override and UI/catalogue row are removed. Original snapshots remain readable through the explicit retired-name registry. V1 retains its fixed historical False identity slot only, preserving the exact profile/runtime digests without changing active-setting, paired-document, source, environment or receipt guards. [Compatibility and CPU acceptance](audit/structured-claims-retirement.md). This is not a live deployment claim.*
 
 **Three coexisting claim-identity systems, each with its own decision-overlay resolution logic**
 
@@ -11011,3 +11011,12 @@ and the registry enumeration), the relevant docs/guide page, and — where subsy
 shows are affected — `docs/infographic/agent-architecture.html`, in the same change; and every
 commit that fixes a finding flips its §5 row. That rule is what keeps this document, CLAUDE.md
 and the tree telling the same story.
+
+
+### 2026-11-11: raw-stage publication acceptance
+
+The prepared raw lane now publishes its new Card and buffered novelty/governance audit in one
+tail-fenced atomic envelope, preserving each producer span. Physical crash-prefix, competing-writer
+and before/after-commit failure checks are recorded in the
+[acceptance result](audit/raw-stage-atomic-publication.md). This is an isolated source result; historical
+logs and the live deployment are separate.

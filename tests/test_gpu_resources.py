@@ -465,8 +465,9 @@ class _EvalResetHost(_Pool):
         """
         raise exc
 
-    def __init__(self, *, parallel):
+    def __init__(self, *, parallel, run_dir):
         super().__init__(ids=(0,), mem={0: 16_000}, parallel=parallel)
+        self.run_dir = run_dir
         self.tracer = _Tracer()
         self.eval_env_calls = []
         self.appended = []
@@ -500,7 +501,7 @@ def _reset_state(node):
         stop_requested=False, halted=False, total_eval_seconds=0.0)
 
 
-def test_parallel_eval_fails_closed_when_reset_superseded_the_reserved_generation(monkeypatch):
+def test_parallel_eval_fails_closed_when_reset_superseded_the_reserved_generation(monkeypatch, tmp_path):
     """A node_reset that lands between the dispatcher's admission (which registered the reservation under
     the OLD generation) and this worker's fresher fold makes the current-generation lookup miss. Under
     parallel dispatch, `_evaluate` must fail closed (return without a terminal) so the dispatcher re-admits
@@ -508,7 +509,7 @@ def test_parallel_eval_fails_closed_when_reset_superseded_the_reserved_generatio
     env that sees every sibling's GPU."""
     from looplab.engine.orchestrator import Engine
 
-    host = _EvalResetHost(parallel=2)
+    host = _EvalResetHost(parallel=2, run_dir=tmp_path)
     host._register_eval_resource_reservation(0, 0, {"gpu_ids": [0], "pin": True})  # admission gen 0
     monkeypatch.setattr("looplab.engine.evaluate.fold", lambda _events: _reset_state(_reset_node(1)))
 
@@ -523,12 +524,12 @@ def test_parallel_eval_fails_closed_when_reset_superseded_the_reserved_generatio
     assert (0, 0) in host._eval_gpu_reservations     # stale-gen reservation left for the dispatcher finally
 
 
-def test_parallel_eval_launches_normally_when_the_reservation_matches_the_generation(monkeypatch):
+def test_parallel_eval_launches_normally_when_the_reservation_matches_the_generation(monkeypatch, tmp_path):
     """The guard is narrow: a reservation registered under the CURRENT generation is not a stale-key miss,
     so `_evaluate` proceeds to launch with that exact PINNED reservation."""
     from looplab.engine.orchestrator import Engine
 
-    host = _EvalResetHost(parallel=2)
+    host = _EvalResetHost(parallel=2, run_dir=tmp_path)
     host._register_eval_resource_reservation(0, 1, {"gpu_ids": [0], "pin": True})  # matches current gen 1
     monkeypatch.setattr("looplab.engine.evaluate.fold", lambda _events: _reset_state(_reset_node(1)))
 
@@ -537,14 +538,14 @@ def test_parallel_eval_launches_normally_when_the_reservation_matches_the_genera
     assert host.eval_env_calls == [{"gpu_ids": [0], "pin": True}]
 
 
-def test_stale_reservation_fails_closed_even_when_eval_parallel_is_lowered_to_one(monkeypatch):
+def test_stale_reservation_fails_closed_even_when_eval_parallel_is_lowered_to_one(monkeypatch, tmp_path):
     """The fail-closed keys on the stale RESERVATION, not the live mutable `_eval_parallel`. A
     Strategist/operator that lowers eval_parallel to 1 mid-batch (while pinned siblings are still
     draining) must not flip a reset lifecycle into an unpinned launch — the stale pinned reservation
     still means the dispatcher must re-admit and re-pin it."""
     from looplab.engine.orchestrator import Engine
 
-    host = _EvalResetHost(parallel=1)                  # live-lowered to serial mid-batch
+    host = _EvalResetHost(parallel=1, run_dir=tmp_path)                  # live-lowered to serial mid-batch
     host._register_eval_resource_reservation(0, 0, {"gpu_ids": [0], "pin": True})  # admitted while parallel
     monkeypatch.setattr("looplab.engine.evaluate.fold", lambda _events: _reset_state(_reset_node(1)))
 
@@ -559,12 +560,12 @@ def test_stale_reservation_fails_closed_even_when_eval_parallel_is_lowered_to_on
     assert (0, 0) in host._eval_gpu_reservations
 
 
-def test_never_admitted_node_is_exempt_from_the_stale_generation_fail_closed(monkeypatch):
+def test_never_admitted_node_is_exempt_from_the_stale_generation_fail_closed(monkeypatch, tmp_path):
     """The only exemption is a never-admitted node: a recovery/test call that holds NO reservation under
     any generation is not a reset-superseded admission, so `_evaluate` proceeds to launch (unpinned)."""
     from looplab.engine.orchestrator import Engine
 
-    host = _EvalResetHost(parallel=2)                  # no reservation registered at all
+    host = _EvalResetHost(parallel=2, run_dir=tmp_path)                  # no reservation registered at all
     monkeypatch.setattr("looplab.engine.evaluate.fold", lambda _events: _reset_state(_reset_node(1)))
 
     with pytest.raises(_ReachedLaunch):

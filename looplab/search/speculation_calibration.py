@@ -15,7 +15,7 @@ import math
 import orjson
 
 from looplab.core.jsonutil import canonical_json
-from looplab.core.config import Settings
+from looplab.core.config import RETIRED_SETTINGS, Settings
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
@@ -27,6 +27,15 @@ SPECULATION_POLICY_SCOPE = "greedy"
 
 SPECULATION_TASK_SCOPE_SCHEMA = "looplab.speculation-task-scope/v1"
 SPECULATION_RUNTIME_SCOPE_SCHEMA = "looplab.speculation-runtime-scope/v1"
+
+# V1's identity reserved this inert field at False. Keep ONLY its historical digest slot,
+# not an active Settings/profile override: removing a no-op must not revoke valid evidence.
+# All live settings, runtime-scope, implementation, task and receipt gates remain unchanged.
+SPECULATION_CALIBRATION_RETIRED_IDENTITY_FIELDS = {"cross_run_structured_claims": False}
+if (set(SPECULATION_CALIBRATION_RETIRED_IDENTITY_FIELDS) & set(Settings.model_fields)
+        or not set(SPECULATION_CALIBRATION_RETIRED_IDENTITY_FIELDS) <= set(RETIRED_SETTINGS)):
+    raise RuntimeError("v1 retired identity slots must name only retired Settings")
+
 
 # The immutable calibration profile covers every Settings field except these
 # experiment inputs.  ``max_nodes`` is nevertheless comparison-relevant and is
@@ -247,6 +256,12 @@ def speculation_runtime_scope_digest(config: object) -> str:
         key: value for key, value in normalized.items()
         if key not in SPECULATION_RUNTIME_SCOPE_IGNORED_FIELDS
     }
+    # V1 included this now-retired no-op at False. Reserve that identity slot for a new
+    # document omitting it; existing explicit values are NEVER replaced or removed. Thus a
+    # historical False snapshot and a new field-free snapshot have the same behavior identity,
+    # while True/other values still hash differently and remain inadmissible calibration inputs.
+    for key, value in SPECULATION_CALIBRATION_RETIRED_IDENTITY_FIELDS.items():
+        settings.setdefault(key, value)
     envelope = {
         "schema": SPECULATION_RUNTIME_SCOPE_SCHEMA,
         "settings": settings,
@@ -386,7 +401,6 @@ _SPECULATION_CALIBRATION_PROFILE_OVERRIDES: dict[str, object] = {
     "cross_run_concepts": False,
     "concept_run_base": False,
     "cross_run_advisory": False,
-    "cross_run_structured_claims": False,
     "cross_run_curation": False,
     "cross_run_curation_auto": False,
     "best_of_n": 1,
@@ -488,7 +502,8 @@ _SPECULATION_CALIBRATION_PROFILE_SCHEMA = "looplab.speculation-calibration-profi
 SPECULATION_CALIBRATION_PROFILE_DIGEST = "sha256:" + hashlib.sha256(orjson.dumps(
     {
         "schema": _SPECULATION_CALIBRATION_PROFILE_SCHEMA,
-        "settings": SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+        "settings": {**SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+                     **SPECULATION_CALIBRATION_RETIRED_IDENTITY_FIELDS},
     },
     option=orjson.OPT_SORT_KEYS,
 )).hexdigest()

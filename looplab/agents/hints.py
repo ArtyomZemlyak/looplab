@@ -3,7 +3,9 @@ context. Model-generated deep-research advisories share the durable hint event f
 but are excluded from this operator-authority block. Hints are append-only events folded into
 `pending_hints`; a human `hint` event may carry
 `replace: true` to SUPERSEDE earlier ones (mirrors the set_strategy/pending_strategy pin), so the
-boss can rewrite the single standing directive instead of piling up contradictory ones.
+boss can rewrite the single standing directive instead of piling up contradictory ones. Scoped
+directions carry stable IDs/topics and active/completed/cancelled lifecycle; the fold removes retired
+directions from this context while preserving their ID tombstones and immutable event history.
 
 Every LLM stage that can act on a directive renders it through this one helper so recency and
 precedence are conveyed identically everywhere (the agent must be able to tell which directive is

@@ -18,7 +18,6 @@ const CROSS_RUN_FLAGS = [
   'cross_run_concepts',
   'cross_run_read_tools',
   'cross_run_advisory',
-  'cross_run_structured_claims',
   'cross_run_curation',
   'cross_run_curation_auto',
 ]
@@ -249,4 +248,12 @@ test('a per-run config draft carries no secret from any schema-declared secret f
   } finally {
     await vite.close()
   }
+})
+
+test('the retired structured-claims switch stays absent when legacy input is read', () => {
+  assert.equal(FIELD_BY_KEY.cross_run_structured_claims, undefined)
+  const form = toForm({ cross_run_structured_claims: true }, SETTINGS_SCHEMA)
+  assert.equal(Object.hasOwn(form, 'cross_run_structured_claims'), false)
+  const payload = settingsSavePayload(form, {}, form, {}, SETTINGS_SCHEMA)
+  assert.equal(Object.hasOwn(payload, 'cross_run_structured_claims'), false)
 })

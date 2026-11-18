@@ -24,6 +24,13 @@ harness effects must not be conflated. Campaigns with different quality or valid
   human decision, dependency, known failure and unattributed. Waiting is not automatically waste.
 - Duplicate/repeated work, repairs, discarded builds and downstream reuse of tools/skills.
 
+For a terminal-to-next-admission interval, preserve the actual terminal, command admission, materialization
+and evaluator-start timestamps. Attribute known subintervals to source/CPU preparation, review/gates,
+transport/approval, resource queue or dependency, with the remainder explicitly unattributed. A ready CPU
+artifact is not native admission. A monitor question may overlap useful execution, so its full open duration
+and native-minus-worker wall time are not automatically pure waiting or GPU waste. Candidate publisher and
+path/schema bugs remain separate from core scheduler defects.
+
 ## Analysis
 
 Report quality-adjusted outcomes per wall hour, agent dollar and GPU hour, plus distributions by task family.

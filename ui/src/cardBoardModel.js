@@ -17,6 +17,7 @@
 // exists to prevent.
 
 import { isRecord } from './panelPrimitives.js'
+import { uiText, uiMessage } from './uiLanguage.js'
 
 // The lifecycle lanes, moved out of CardBoard.jsx so the board and its tests read ONE table.
 // `coded` was retained here for a year as a RESERVED lane the fold did not emit. It is now REAL
@@ -101,6 +102,26 @@ const BLOCKER_FAULT = {
 const BELIEF_ONLY_BLOCKERS = new Set(
   ['identity_not_native', 'action_owner_missing', 'freshness_unknown'])
 
+const BLOCKER_HELP = {
+  work_terminal: 'The work has reached a terminal result; the queue will not run it again. This is not an error.',
+  work_in_flight: 'The recorded work is already running or admitted. A pause is not proof that its process stopped.',
+  card_terminal: 'This work item is closed; no new experiment is selected automatically.',
+  merged_work_items: 'This work item was merged into another one. Follow the surviving work item.',
+  freshness_stale: 'A newer proposal supersedes this one; check current evidence before retrying.',
+  identity_not_native: 'This is an authored research idea, not an executable work item yet.',
+  action_owner_missing: 'No receipt identifies who owns this action. The queue cannot safely assign it.',
+  action_owner_ambiguous: 'Multiple receipts claim ownership. Reconcile them before treating either as current.',
+  action_receipt_incomplete: 'The ownership receipt is incomplete, so the current owner cannot be established. This is not proof that the action was applied.',
+  freshness_unknown: 'The action provenance is unavailable; currentness is unknown, not stale or fresh by assumption.',
+  work_owner_unknown: 'The recorded work cannot be matched to a known owner; inspect its source and receipts.',
+}
+
+export function cardSelectionExplanation(blockers) {
+  return (Array.isArray(blockers) ? blockers : []).map(name => uiMessage('{0}: {1}', [
+    name, uiText(BLOCKER_HELP[name] || 'Unrecognised blocker; inspect the ledger before acting.'),
+  ])).join('\n')
+}
+
 // ONE BLOCKER, TWO TRUTHS — and the board was telling both at once, on one card, on one screen.
 //
 // `work_in_flight` means the card is owned by an experiment that has not reached a terminal. That
@@ -149,8 +170,8 @@ export function cardSelectionBlock(card) {
   const lifecycle = blockers.filter(name => BLOCKER_LIFECYCLE[name])
   const unmapped = blockers.filter(name => !BLOCKER_FAULT[name] && !BLOCKER_LIFECYCLE[name])
   const detail = blockers.length
-    ? `not selectable: ${blockers.join(', ')}`
-    : 'not selectable, and the ledger recorded no reason'
+    ? uiMessage('not selectable: {0} {1}', [blockers.join(', '), '\n' + cardSelectionExplanation(blockers)])
+    : uiText('not selectable, and the ledger recorded no reason')
   if (faults.length) {
     return { tone: 'fault', label: BLOCKER_FAULT[faults[0]], title: detail }
   }

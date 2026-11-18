@@ -2473,8 +2473,10 @@ def test_stage_prepared_card_id_lock_contains_only_the_tail_cas_append():
         node for node in ast.walk(lock_blocks[0])
         if isinstance(node, ast.Call)
     ]
-    assert [ast.unparse(call.func) for call in locked_calls] == ["self.store.append"]
-    assert any(keyword.arg == "expected_last_seq" for keyword in locked_calls[0].keywords)
+    assert [ast.unparse(call.func) for call in locked_calls] == [
+        "self.store.append_many", "self.store.append"]
+    assert all(any(keyword.arg == "expected_last_seq" for keyword in call.keywords)
+               for call in locked_calls)
     locked_source = ast.get_source_segment(source, lock_blocks[0]) or ""
     assert "self.store.append(" in locked_source
     assert "self.store.read_all(" not in locked_source

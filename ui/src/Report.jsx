@@ -25,6 +25,7 @@ import { ReportFigures, ReportVersions } from './ReportExtras.jsx'
 import ResearchMap from './ResearchMap.jsx'
 import ReportMetricBindings from './ReportMetricBindings.jsx'
 import CampaignOverviewResource from './CampaignOverview.jsx'
+import ReportReview from './ReportReview.jsx'
 
 const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
 const TRUST_LABEL = { unverified: 'not fully verified', caveats: 'with caveats', suspect: 'flags found' }
@@ -675,6 +676,8 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         nodes={state.nodes} championId={best?.id ?? null} runId={runId}
         figures={state.report?.figures} liveReads={!readOnly || readOnlyReason === 'history'} />
       {/* Every published version, and a field-by-field comparison of any two (section 6.3). */}
+      {rep && <ReportReview key={`${runId}:${expectedGeneration}:${readOnly}`} runId={runId}
+        generation={expectedGeneration} readOnly={readOnly} modelUnavailable={needsModel} />}
       {rep && <ReportVersions runId={runId} generation={expectedGeneration} requestedReport={requestedReport} available={readOnlyReason !== 'review'} />}
       {!rep && <p className="report-section-intro">{uiText('No detailed Assistant report has been published. Recorded outcomes remain available; discuss them in chat or refresh the report.')}</p>}
 

@@ -46,7 +46,14 @@ def _unpacks_the_audit_tuple(node) -> bool:
         kwargs = {kw.arg for kw in inner.keywords}
         if {"trace_id", "span_id"} <= kwargs:
             return True
-    return False
+    # The normalized batch path carries the SAME four fields in two aligned append calls.
+    pairs = set()
+    for inner in ast.walk(node):
+        if (isinstance(inner, ast.Call) and getattr(inner.func, "attr", None) == "append"
+                and len(inner.args) == 1 and isinstance(inner.args[0], ast.Tuple)):
+            pairs.add(tuple(ast.unparse(value) for value in inner.args[0].elts))
+    names = tuple(ast.unparse(value) for value in target.elts)
+    return {names[:2], names[2:]} <= pairs
 
 
 def test_the_publish_loop_exists_exactly_once_and_it_is_in_the_sink_s_own_module():
@@ -133,3 +140,5 @@ def test_the_ast_shapes_can_actually_fail():
     # unrelated loops this rule must leave alone, or the guard becomes noise nobody reads.
     assert not _unpacks_the_audit_tuple(
         ast.parse("for a, b, c, d in rows:\n    out.append((a, b))").body[0])
+    assert _unpacks_the_audit_tuple(ast.parse(
+        "for a, b, c, d in rows:\n    out.append((a, b))\n    contexts.append((c, d))").body[0])

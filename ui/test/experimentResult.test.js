@@ -65,6 +65,20 @@ test('parent comparison honors receipts, source changes and objective retargets'
   } finally { await mounted.unmount() }
 })
 
+test('a completed artifact job explains missing scalar without calling it a measured improvement', async () => {
+  const artifact = { ...node, metric: null, kind: 'artifact', job_role: 'score', parent_ids: [] }
+  const mounted = await harness.mount(Result, { node: artifact,
+    state: { ...state, best_node_id: null, nodes: { 1: artifact } } })
+  try {
+    assert.match(mounted.container.textContent, /Artifact job: a ranking scalar is not expected/)
+    assert.match(mounted.container.textContent, /Job role: score/)
+    assert.doesNotMatch(mounted.container.textContent, /Selected by the engine/)
+    await mounted.rerender({ node: { ...artifact, kind: null }, state: { ...state, best_node_id: null, nodes: { 1: { ...artifact, kind: null } } } })
+    assert.match(mounted.container.textContent, /No primary scalar is recorded/)
+    assert.match(mounted.container.textContent, /not zero/)
+  } finally { await mounted.unmount() }
+})
+
 test('unfinished, removed, infeasible and salvaged results cannot look like a successful winner', async () => {
   const mounted = await harness.mount(Result, { node, state })
   try {

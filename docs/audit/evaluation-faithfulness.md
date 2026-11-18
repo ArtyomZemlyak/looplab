@@ -22,6 +22,13 @@ new paperwork requirement.
    Execution integrity alone must not produce an attested verdict.
 5. A technical retry with no literature or new research question. It must remain possible without a warning
    storm or a fabricated scientific claim.
+6. Genuine saved-vector metrics on an artifact node have no matching scalar in that node. Preserve the
+   vector's source/attempt/test binding and the absent scalar consistency separately; do not synthesize a
+   measured annotation or treat equal recomputed values as independent evaluator attestation.
+7. An experiment-registration/budget-only amendment does not move task/files, whereas a task command or
+   protected-input amendment does. Show the current conservative protocol flag and the exact changed facets.
+   An explicitly reviewed scientific comparison may describe matched inputs without rewriting that flag or
+   claiming all protocol versions were identical. Unknown source/data provenance remains unknown.
 
 An independent reviewer sees the original question and evaluator before the candidate's explanation. Reviewer
 agreement is an evidence tier, not a proof of truth. Any post-result contract edit creates a new version.

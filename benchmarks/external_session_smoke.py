@@ -15,7 +15,7 @@ check explicit recovery with a fresh evaluator question.
 Use --obligations to exercise enabled research, concept base, report and
 lesson/skill reviews across MCP sessions and node reset.
 Use --monitor for a checked operator training/evaluation command, followed by
-an advisory monitor that survives a second MCP loss and UI restart.
+an unreviewed completed observation that survives a second MCP loss and UI restart.
 
 What the scenario covers (moved from docs/guide/external-harness.md, doc 82 П1):
 
@@ -46,15 +46,12 @@ reviews because this single deterministic fixture supports no reusable ML findin
 Reports/reviews survive reconnect and become due again after reset, even when the
 node count is unchanged. Finalization closes finish obligations without satisfying
 an expansion-only research gate. This flag can be combined with `--engine-loss`.
-With `--monitor`, the operator declares one protected `train_eval` command with a
-training role. It performs training and scoring once. Monitoring is enabled with
-kill configured and a 600-second cadence; the fast command opens its first question
-in the final observation before node terminal. The fixture kills a second owned
-MCP process at that monitor, restarts its UI again, and verifies the same question
-and live engine on reconnect. Advisory `abort` is refused, explicit `continue`
-settles the question, and exact replay creates no duplicate answer. Reset gets a
-fresh monitor; the failed configuration keeps no metric after its own review.
-This tests completed-command advisory recovery, not live-curve stop judgment.
+With `--monitor`, the operator declares one protected `train_eval` command with a training role.
+The fast command publishes its final observation, then reaches terminal without an agent review.
+The fixture kills a second owned MCP process, restarts its UI again, and verifies the same immutable
+observation, explicit ended_before_decision closure and unknown review on reconnect. No continue or
+healthy verdict is invented. Reset creates fresh evidence; failed work retains its actual outcome.
+This tests completed-command review recovery, not live-curve stop judgment.
 Only this fixture restores its known valid bytes; that is not a production repair
 procedure. `acceptance.json`, engine logs and inspection output are saved under the
 output directory. This checks protocol recovery, not model judgments or interactive
@@ -83,7 +80,6 @@ import uvicorn
 
 from benchmarks.claude_harness_smoke import SCORER, wait_for
 from benchmarks._external_obligation_cycle import settle_obligations
-from benchmarks._external_monitor_cycle import drain_monitors
 from looplab.events.eventstore import EventStore
 from looplab.harness.mcp_server import HarnessAPI
 from looplab.serve.protocol import COMMAND_TERMINAL_STATUSES
@@ -186,9 +182,6 @@ class Client:
     async def terminal(self, nid, status="evaluated"):
         async def observed():
             value = await self.state()
-            if self.monitor and value["state"]["nodes"].get(str(nid), {}).get("status") == "pending":
-                await drain_monitors(self, nid)
-                value = await self.state()
             return value
         value = await until(observed, lambda row: row["state"]["nodes"].get(str(nid), {}).get("status") == status)
         return value["state"]["nodes"][str(nid)]
@@ -238,6 +231,10 @@ def main():
     task_path = root / "task.json"; task_path.write_text(json.dumps(task), encoding="utf8")
     token, owner = secrets.token_hex(32), secrets.token_hex(32)
     env_before = dict(os.environ)
+    # Child cwd is a new output directory. Bind this checkout ahead of any installed/editable
+    # package so a recovery acceptance cannot silently execute another version of LoopLab.
+    checkout = str(Path(__file__).resolve().parents[1])
+    os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, (checkout, os.environ.get("PYTHONPATH"))))
     os.environ.update(LOOPLAB_HARNESS_TOKEN=token, LOOPLAB_UI_TOKEN=owner,
         LOOPLAB_MEMORY_DIR=str(root / "memory"), LOOPLAB_KNOWLEDGE_DIR=str(root / "knowledge"),
         CUDA_VISIBLE_DEVICES="")
@@ -417,30 +414,38 @@ def main():
         await client.request("POST", "harness-checkpoints", answer, status=503)
         proof["first_stage_answer"] = answer
         if args.monitor:
-            rows = await until(lambda: client.read("harness-checkpoints"), lambda value:
-                any(row["phase_id"] == "train_monitor" for row in value["pending"]))
-            monitor, = rows["pending"]
+            progress = await until(lambda: client.read("harness-progress"),
+                                   lambda value: value.get("unreviewed_monitor_count", 0) > 0)
+            observation, = progress["unreviewed_monitor_observations"]
+            monitor = observation["question"]
             assert monitor["node_id"] == 0 and monitor["kill_enabled"] is False
-            progress = await client.progress()
-            assert progress["next_step"]["phase_id"] == "monitor"
-            node = (await client.state())["state"]["nodes"]["0"]
-            assert node["status"] == "pending" and node["metric"] is None
+            assert observation["answer"] is None and observation["status"] == "ended_before_decision"
+            node = await client.terminal(0)
+            assert node["metric"] is not None
+            # The closure can precede invocation settlement; refresh the final event prefix
+            # before retaining its joined timing fields for exact reconnect comparison.
+            progress = await client.read("harness-progress")
+            observation = next(row for row in progress["unreviewed_monitor_observations"]
+                               if row["question"]["checkpoint_id"] == monitor["checkpoint_id"])
             proof["monitor_checkpoint"] = monitor["checkpoint_id"]
+            proof["monitor_observation"] = observation
             proof["monitor_journal_sha256"] = hashlib.sha256(journal.read_bytes()).hexdigest()
-            proof["observations"].append("completed protected command held its terminal at the first advisory monitor; second MCP process killed before answering")
+            proof["observations"].append("completed protected command reached terminal while its original monitor observation stayed unreviewed; MCP disconnected without answering")
             return
         await after_first_answer(client)
 
     async def after_first_answer(client):
         answer = proof.pop("first_stage_answer")
         if args.monitor:
-            rows = (await client.read("harness-checkpoints"))["pending"]
-            assert len(rows) == 1 and rows[0]["checkpoint_id"] == proof["monitor_checkpoint"]
+            progress = await client.read("harness-progress")
+            assert progress["pending_checkpoint_count"] == 0
+            rows = progress["unreviewed_monitor_observations"]
+            assert len(rows) == 1 and rows[0] == proof["monitor_observation"]
             journal = runs / "demo" / "harness_checkpoints.jsonl"
             assert hashlib.sha256(journal.read_bytes()).hexdigest() == proof.pop("monitor_journal_sha256")
             assert len(owned_engines) == 1 + int(args.engine_loss)
             assert owned_engines[-1].poll() is None
-            proof["observations"].append("restarted UI and fresh MCP retained the unanswered monitor and same live engine")
+            proof["observations"].append("restarted UI and fresh MCP retained completed execution and the same unreviewed monitor evidence")
         first_node = await client.terminal(0)
         assert (await client.request("POST", "harness-checkpoints", answer))["replayed"]
         summary = ("После остановки engine незавершённую оценку выполнили заново. Кандидат сохранился; новый evaluator потребовал свежий checkpoint, старый ответ отклонён. Получен один terminal-результат; повторяемость ещё не проверена."
@@ -577,8 +582,13 @@ def main():
         assert all(row.data["name"] == ("train_eval" if args.monitor else "score") for row in first_stages)
         proof["initial_score_stage_completions"] = len(first_stages)
         if args.monitor:
-            assert len(proof["monitor_answers"]) == 4
-            assert all(row["advisory_abort_refused"] for row in proof["monitor_answers"])
+            rows = [json.loads(line) for line in (runs / "demo" / "harness_checkpoints.jsonl").read_text().splitlines()]
+            monitors = [row for row in rows if row["type"] == "question" and row["phase_id"] == "train_monitor"]
+            closures = {row["checkpoint_id"]: row for row in rows if row["type"] == "closure"}
+            assert len(monitors) >= 3 and not proof["monitor_answers"]
+            assert all(q["checkpoint_id"] in closures for q in monitors)
+            assert all(closures[q["checkpoint_id"]]["review_status"] == "unreviewed" for q in monitors)
+            proof["completed_unreviewed_monitors"] = len(monitors)
         if args.obligations:
             counts = {kind: sum(row.type == kind for row in events) for kind in
                       ("research_completed", "run_concepts", "report_generated")}

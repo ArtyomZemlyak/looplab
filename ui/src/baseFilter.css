@@ -1,1 +1,2 @@
 .base-filter { display: flex; align-items: center; gap: 6px; }
+.react-flow__edge.uses .react-flow__edge-path { stroke-dasharray: 6 4; }

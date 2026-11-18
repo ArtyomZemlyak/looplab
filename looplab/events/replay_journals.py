@@ -27,7 +27,7 @@ from types import MappingProxyType
 
 from looplab.core.fitness import is_usable_metric
 from looplab.core.jsonutil import bounded_int
-from looplab.core.models import Event, RunState
+from looplab.core.models import Event, NodeStatus, RunState
 from looplab.events.replay_ctx import _FoldCtx, event_timestamp
 from looplab.events.types import (
     EV_AGENT_DECISION, EV_COVERAGE_SNAPSHOT, EV_CROSS_RUN_PRIOR, EV_DATA_LEAKAGE, EV_DATA_PROFILED,
@@ -35,7 +35,7 @@ from looplab.events.types import (
     EV_LESSONS_DISTILLED, EV_LESSONS_REFRESHED, EV_LITERATURE_RETRIEVED, EV_LLM_COST, EV_LLM_USAGE,
     EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PLAN, EV_POLICY_DECISION, EV_REPORT_GENERATED,
     EV_RESEARCH_ATTEMPTED, EV_RESEARCH_COMPLETED, EV_RUNG_PROMOTED, EV_STRATEGY_DECISION,
-    EV_WORKSPACE_CHANGED,
+    EV_WORKSPACE_CHANGED, EV_METRIC_BEHAVIOR_SCAN,
 )
 
 
@@ -250,7 +250,9 @@ def _on_plan(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         return
     st.plan = dict(d)
     st.plan_history.append({"at_node": d.get("at_node"), "reason": d.get("reason"),
-                            "endgame_start": d.get("endgame_start"), "reserve": d.get("reserve")})
+                            "endgame_start": d.get("endgame_start"), "reserve": d.get("reserve"),
+                            **({"node_count_basis": d["node_count_basis"]}
+                               if "node_count_basis" in d else {})})
 
 
 def _on_rung_promoted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -353,6 +355,20 @@ def _on_literature_retrieved(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -
             st.literature.append({**item, "at_node": at_node})
 
 
+def _on_metric_behavior_scan(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Reconstruct against the native prefix. A forged diagnostic cannot invent an observation.
+    # This projection is advisory: selection, launch and lesson verdicts never read it.
+    from looplab.core.metric_behavior import metric_behavior_scan
+    nid = d.get('node_id')
+    node = st.nodes.get(nid) if type(nid) is int else None
+    if node is None or node.status is not NodeStatus.evaluated or type(node.terminal_event_seq) is not int:
+        return
+    verified = metric_behavior_scan(node, st.nodes.values(), aborted=st.aborted_nodes)
+    from looplab.core.jsonutil import canonical_json_digest
+    if canonical_json_digest(d) == canonical_json_digest(verified):
+        st.metric_behavior_scans[nid] = verified
+
+
 def _on_lessons_distilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # M6 does not re-rank current nodes/best; at_node + pair ids are behavioral replay gates that
     # prevent paid re-distillation, while the shared lesson output can steer later proposals.
@@ -424,6 +440,7 @@ def _on_upstream_execution(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
 
 
 HANDLERS = {
+    EV_METRIC_BEHAVIOR_SCAN: _on_metric_behavior_scan,
     **{name: _on_upstream for name in ("upstream_proposal_started", "upstream_proposed",
        "upstream_proposal_failed", "upstream_gate_started",
        "upstream_gate_finished", "upstream_gate_abandoned", "base_advanced",

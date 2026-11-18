@@ -42,3 +42,39 @@ test('opens recorded question and navigates to its declared node', async () => {
     } finally { await view.unmount() }
   } finally { await h.close() }
 })
+
+test('Next follows unequal collection cursors and Previous restores the prior request', async () => {
+  const h = await mountLive()
+  try {
+    const { default: ResearchMap } = await h.load('/src/ResearchMap.jsx')
+    const names = ['uploads', 'cards', 'research_memos', 'reviews', 'decisions', 'experiments', 'nodes', 'reports']
+    const tok = n => `map1:${n}:${'a'.repeat(64)}`
+    const requests = []
+    const data = second => ({ response_budget: {version: 1, limited: !second, omitted_sections: []},
+      source_health: {protocol: {read_complete: true}},
+      ...Object.fromEntries(names.map(name => [name, {items: [], total: 0, selected: true, has_more: false, next_cursor: tok(0)}])),
+      experiments: {items: [{experiment_id: second ? 'e2' : 'e1', title: second ? 'Second question' : 'First question', arms: []}],
+        total: 2, selected: true, has_more: !second, next_cursor: tok(second ? 2 : 1)},
+      nodes: {items: (second ? [3,4] : [0,1,2]).map(node_id => ({node_id,status: 'evaluated',title: 'Candidate',parent_ids: [], uses: [],extra_metric_keys: []})),
+        total: 5, selected: true, has_more: !second, next_cursor: tok(second ? 5 : 3)} })
+    globalThis.fetch = fetchStub({'GET /api/runs/r/research-map': ({url}) => {
+      requests.push(url)
+      return data(url.searchParams.has('cursors'))
+    }})
+    const view = await h.mount(ResearchMap, {runId: 'r', generation: 'a'.repeat(64),readOnly: true})
+    try {
+      const details = view.container.querySelector('details')
+      await React.act(async () => {details.open = true; details.dispatchEvent(new window.Event('toggle'))})
+      await until(() => view.container.textContent.includes('First question'), 'first page')
+      await click([...view.container.querySelectorAll('button')].find(b => b.textContent === 'Next'))
+      await until(() => view.container.textContent.includes('Second question'), 'continued page')
+      const query = requests.at(-1).searchParams, cursors = JSON.parse(query.get('cursors'))
+      assert.equal(query.get('offset'), '0')
+      assert.equal(cursors.experiments, tok(1)); assert.equal(cursors.nodes, tok(3))
+      await click([...view.container.querySelectorAll('button')].find(b => b.textContent === 'Previous'))
+      await until(() => view.container.textContent.includes('First question'), 'previous page')
+      assert.equal(requests.at(-1).searchParams.has('cursors'), false)
+      assert.ok(globalThis.fetch.calls.every(call => call.method === 'GET'))
+    } finally {await view.unmount()}
+  } finally {await h.close()}
+})

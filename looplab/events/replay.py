@@ -615,6 +615,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             deleted=d.get("deleted", []) or [],
             attempt=generation,
             creation_event_seq=e.seq,
+            created_at=e.ts if e.ts > 0 else None,
             origin=d.get("origin"),   # cross-run provenance (None for ordinary nodes)
             # IN-run fork provenance: the operator branched from a node (usually while reading a
             # historical snapshot) and edited its idea. Additive with a reader-side default, so old
@@ -625,6 +626,12 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             kind=("artifact" if d.get("node_kind") == "artifact" or idea.node_kind == "artifact"
                   else None),
             job_role=(str(d.get("job_role"))[:32] if d.get("job_role") is not None else None),
+            expected_evaluator_digest=(
+                str(d["expected_evaluator_digest"]).strip().lower()
+                if isinstance(d.get("expected_evaluator_digest"), str)
+                and len(d["expected_evaluator_digest"].strip()) == 64
+                else None
+            ),
             uses=uses,
             uses_attempts=_use_pins(st, d, parent_ids, uses, declared),
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
@@ -868,6 +875,7 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             n.self_metric = _finite_metric(d.get("self_metric"))
             n.status = NodeStatus.evaluated
             n.terminal_event_seq = e.seq
+            n.completed_at = e.ts if e.ts > 0 else None
             n.rerun_stage = None                # any stage-scoped re-run has now landed
             n.stdout_tail = d.get("stdout_tail", "")
             # WHY this node scored what it scored, in the eval's own words — see
@@ -993,6 +1001,7 @@ def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         if first_terminal:
             n.status = NodeStatus.failed
             n.terminal_event_seq = e.seq
+            n.completed_at = e.ts if e.ts > 0 else None
             n.error = d.get("error", "")
             # COERCED, because assignment skips pydantic validation and `_card_debuggable_leaf_ids`
             # later does `node.error_reason not in {"idea_rejected", "card_dropped"}` — a SET
@@ -1229,6 +1238,7 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.attempt += 1
         n.status = NodeStatus.pending
         n.terminal_event_seq = None
+        n.completed_at = None
         n.metric = None
         n.task_metric = None
         n.error = ""
@@ -1712,6 +1722,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             st.pause_reason = None
         n.status = NodeStatus.pending
         n.terminal_event_seq = None
+        n.completed_at = None
         n.metric = None
         n.task_metric = None
         n.error = ""
@@ -1843,6 +1854,11 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 n.rerun_stage = None
                 n.stages = []
         _clear_build_marker(st, d, n.id)
+        n.resume_inputs = (
+            [dict(item) for item in d["resume_inputs"] if isinstance(item, dict)]
+            if isinstance(d.get("resume_inputs"), list)
+            else []
+        )
         # Reset itself clears `finished`, so a later resume cannot observe the old finished edge.
         # Invalidate the completed confirmation/approval epoch here, before clearing it.
         # Requeuing every OTHER incumbent (wiping its metric to force a re-eval on the newly-hidden

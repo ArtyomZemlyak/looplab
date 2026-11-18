@@ -292,6 +292,12 @@ def _clip(text, n: int = _SUMMARY_CHARS) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+def _node_label(node: Any, generation: Any) -> str:
+    if isinstance(generation, int) and not isinstance(generation, bool) and generation >= 0:
+        return f"node {node} (gen {generation})"
+    return f"node {node}"
+
+
 def derive_log_events(run_id: str, run_uid: str, events) -> list[dict]:
     """Actionable rows from NEW event-log rows (each keyed by its seq)."""
     from looplab.events.types import (EV_HINT, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_PAUSE,
@@ -304,19 +310,20 @@ def derive_log_events(run_id: str, run_uid: str, events) -> list[dict]:
         base = {"run_id": run_id, "run_uid": run_uid, "seq": ev.seq,
                 "key": f"{run_uid}:seq:{ev.seq}"}
         node = data.get("node_id")
+        generation = data.get("generation")
         if ev.type == EV_NODE_EVALUATED:
             metric = data.get("metric")
             out.append({**base, "kind": "node_evaluated", "node_id": node,
-                        "summary": f"node {node} evaluated: metric={metric}",
-                        "details": {"metric": metric, "generation": data.get("generation")}})
+                        "summary": f"{_node_label(node, generation)} evaluated: metric={metric}",
+                        "details": {"metric": metric, "generation": generation}})
         elif ev.type == EV_NODE_FAILED:
             forensics = data.get("failure_forensics") if isinstance(
                 data.get("failure_forensics"), dict) else {}
             headline = forensics.get("headline") or data.get("reason") or ""
             out.append({**base, "kind": "node_failed", "node_id": node,
-                        "summary": _clip(f"node {node} failed: {headline}"),
+                        "summary": _clip(f"{_node_label(node, generation)} failed: {headline}"),
                         "details": {"reason": data.get("reason"),
-                                    "generation": data.get("generation"),
+                                    "generation": generation,
                                     "error": _clip(data.get("error"), 400),
                                     **({"forensics": {k: forensics.get(k) for k in
                                                       ("headline", "signals", "exit_codes",
@@ -325,10 +332,11 @@ def derive_log_events(run_id: str, run_uid: str, events) -> list[dict]:
                                        if forensics else {})}})
         elif ev.type == EV_STAGE_FINISHED and data.get("status") in STAGE_FAILED_STATUSES:
             out.append({**base, "kind": "stage_failed", "node_id": node,
-                        "summary": _clip(f"node {node} stage {data.get('name')} "
+                        "summary": _clip(f"{_node_label(node, generation)} stage {data.get('name')} "
                                          f"{data.get('status')} (exit {data.get('exit_code')})"),
                         "details": {"stage": data.get("name"), "status": data.get("status"),
-                                    "exit_code": data.get("exit_code")}})
+                                    "exit_code": data.get("exit_code"),
+                                    "generation": generation}})
         elif ev.type == EV_HINT:
             out.append({**base, "kind": "operator_direction",
                         "summary": "operator direction changed; read the latest standing directions",
@@ -359,13 +367,17 @@ def derive_condition_events(run_id: str, run_uid: str, progress: dict, *,
         cid = question.get("checkpoint_id")
         if not cid:
             continue
+        q_gen = question.get("node_generation")
+        if q_gen is None:
+            q_gen = question.get("generation")
         out.append({"run_id": run_id, "run_uid": run_uid, "seq": seq,
                     "kind": "monitor_question", "node_id": question.get("node_id"),
                     "key": f"{run_uid}:checkpoint:{cid}",
-                    "summary": _clip(f"{question.get('phase_id')} question pending for node "
-                                     f"{question.get('node_id')} stage {question.get('stage')}"),
+                    "summary": _clip(f"{question.get('phase_id')} question pending for "
+                                     f"{_node_label(question.get('node_id'), q_gen)} stage {question.get('stage')}"),
                     "details": {"checkpoint_id": cid, "phase_id": question.get("phase_id"),
-                                "stage": question.get("stage")}})
+                                "stage": question.get("stage"),
+                                "node_generation": q_gen}})
     revision = progress.get("evidence_revision")
     at_node = progress.get("at_node")
     step = progress.get("next_step") or {}

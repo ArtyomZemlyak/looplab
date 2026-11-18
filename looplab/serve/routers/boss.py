@@ -487,6 +487,8 @@ def build_router(srv) -> APIRouter:
             name="fastapi",
         )
     router = APIRouter()
+    from looplab.serve.report_review import build_router as report_review_router
+    router.include_router(report_review_router(srv))
     _run_dir = srv.run_dir
     _llm_settings = srv.llm_settings
     # RunCommandService invokes this optional callback before acquiring its destructive sequencer.

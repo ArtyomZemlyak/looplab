@@ -416,24 +416,80 @@ def _account_tail(stream: str, raw: str, share: int, redact) -> str:
     return f"{label}\n{block}\n"
 
 
-def canary_already_passed(events, node_id: int, generation: int, code_digest: str) -> bool:
-    """True when the log already holds a PASSED canary for this exact (node, generation, code).
+def _invalidated_lifecycles(events) -> tuple[set[tuple[int, int]], set[int]]:
+    """Lifecycles superseded by `node_reset`/re-creation, plus aborted node ids."""
+    superseded: set[tuple[int, int]] = set()
+    aborted: set[int] = set()
+    max_gen: dict[int, int] = {}
+    for e in events or ():
+        etype = getattr(e, "type", None)
+        d = getattr(e, "data", None)
+        if not isinstance(d, dict):
+            continue
+        nid = coerce_node_id(d)
+        if nid is None:
+            continue
+        if etype == "node_created":
+            gen = d.get("generation", d.get("attempt", 0))
+            if type(gen) is int and gen > max_gen.get(nid, -1):
+                for old in range(0, gen):
+                    superseded.add((nid, old))
+                max_gen[nid] = gen
+        elif etype == "node_reset":
+            prev = max_gen.get(nid, 0)
+            superseded.add((nid, prev))
+            max_gen[nid] = prev + 1
+            aborted.discard(nid)
+        elif etype == "node_abort":
+            aborted.add(nid)
+    return superseded, aborted
+
+
+_LEGACY_CANARY_CONTRACT = object()
+
+
+def canary_already_passed(events, node_id: int, generation: int, code_digest: str,
+                          *, equivalence_digest=_LEGACY_CANARY_CONTRACT) -> bool:
+    """True when the log already holds a PASSED canary for this exact (node, generation, code),
+    or for an un-reset, non-inconclusive sibling lifecycle sharing the full `equivalence_digest`
+    (doc 69 69.31: identical code/files, substrate, evaluator contract, canary spec, `node_kind`
+    and lifecycle-pinned `uses` inputs).
 
     Read off the raw rows like `evaluate.py::_durable_full_retrains`: the gate is the durable row
-    itself (invariant #3), so a resumed process — and a later attempt in this one, e.g. after a
-    dependency round that changed no code — never re-runs a canary it has already paid for."""
+    itself (invariant #3), so a resumed process — a later attempt after a dependency round, or an
+    equivalent sibling node — never re-runs a canary it has already paid for, while a reset of
+    `node_id` itself still requires a fresh canary on its new lifecycle."""
     if not code_digest:
         return False
-    for e in events or []:
+    rows = list(events or ())
+    superseded: Optional[set[tuple[int, int]]] = None
+    aborted: Optional[set[int]] = None
+    for e in rows:
         if getattr(e, "type", None) != EV_EVAL_CANARY_FINISHED:
             continue
         d = getattr(e, "data", None) or {}
-        # Keyed exactly as `evaluate.py::_durable_row_belongs` keys a durable row (the fold's own
-        # node/generation rules), then on the code digest and an explicit `passed: true`.
-        if (isinstance(d, dict) and coerce_node_id(d) == node_id
-                and event_generation_binds(d, generation)
-                and d.get("code_digest") == code_digest and d.get("passed") is True):
-            return True
+        if not isinstance(d, dict) or d.get("passed") is not True:
+            continue
+        row_node = coerce_node_id(d)
+        if row_node is None:
+            continue
+        if row_node == node_id:
+            if (event_generation_binds(d, generation) and d.get("code_digest") == code_digest
+                    and (equivalence_digest is _LEGACY_CANARY_CONTRACT
+                         or not d.get("equivalence_digest")
+                         or d.get("equivalence_digest") == equivalence_digest)):
+                return True
+            continue
+        if (equivalence_digest is not _LEGACY_CANARY_CONTRACT
+                and equivalence_digest and d.get("equivalence_digest") == equivalence_digest
+                and not d.get("inconclusive")):
+            if superseded is None or aborted is None:
+                superseded, aborted = _invalidated_lifecycles(rows)
+            row_gen = d.get("generation", d.get("attempt", 0))
+            if (type(row_gen) is int and row_gen >= 0
+                    and row_node not in aborted
+                    and (row_node, row_gen) not in superseded):
+                return True
     return False
 
 

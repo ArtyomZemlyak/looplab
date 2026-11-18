@@ -1,5 +1,5 @@
 """C2 · Best-of-N candidate selection (ADR-7). Generate N independent implementations and keep the
-best by an EXECUTION-FREE reward (static validity + a metric-print signal) — the single most reliable
+best by the default EXECUTION-FREE reward (static validity + a metric-print signal) — the single most reliable
 SWE-bench lever for weak local models (SWE-RM best-of-k: +10 pts), without spending an eval per
 candidate. Wraps any Developer; forwards repair/audit hooks so it composes with the loop unchanged.
 
@@ -185,7 +185,13 @@ class BestOfNDeveloper(WrapsDeveloper):
 
     def __init__(self, inner, n: int = 3, listwise: bool = True, parser: str = "tool_call",
                  foresight: bool = True, direction: str = "min", goal: str = "",
-                 min_confidence: float = 0.0):
+                 min_confidence: float = 0.0, pilot=None, pilot_assets=None):
+        from looplab.core.best_of_n import normalize_pilot
+        self.pilot = normalize_pilot(pilot)
+        self.pilot_assets = pilot_assets or {}
+        if self.pilot is not None and not 2 <= n <= 8:
+            from looplab.core.errors import ConfigRefusal
+            raise ConfigRefusal('native Best-of-N pilot requires2..8 candidates')
         self.inner = inner
         self.n = max(1, n)
         self.listwise = listwise
@@ -220,6 +226,8 @@ class BestOfNDeveloper(WrapsDeveloper):
         extra = super().audit_extra()
         extra["best_of_n"] = self.n
         extra["foresight"] = self.last_foresight_pick is not None
+        if self.pilot is not None:
+            extra["pilot_selection"] = "deferred_to_native_admitted_program"
         return extra
 
     def implement(self, idea: Idea) -> str:
@@ -276,6 +284,35 @@ class BestOfNDeveloper(WrapsDeveloper):
             cands.append((code, getattr(self.inner, "last_files", {}) or {},
                           getattr(self.inner, "last_deleted", []) or [], footprint, sc,
                           {a: getattr(self.inner, a, None) for a in DEVELOPER_OUTPUT_ATTRS}))
+        if self.pilot is not None:
+            from looplab.search.best_of_n_pilot import pilot_rank
+            from looplab.core.errors import ConfigRefusal
+            from looplab.core.cards import normalize_researcher_footprint
+            if any(c[1] or c[2] for c in cands):
+                raise ConfigRefusal('native pilot supports code-only scripts, not side-file patches')
+            if any(c[5].get('last_rollback_stage') or c[5].get('last_budget_exhausted') for c in cands):
+                raise ConfigRefusal('an incomplete or rollback-requesting build cannot become a pilot candidate')
+            valid = [c for c in cands if c[4] >= 3.0]
+            if len(valid) < 2:
+                raise ConfigRefusal('native pilot needs at least2 statically valid candidates')
+            self._last_candidates = [(c[0], {}, [], c[3]) for c in valid]
+            self.last_foresight_pick = None
+            self._chosen_report = None  # no statically selected candidate's report may claim the runtime winner
+            for name in DEVELOPER_OUTPUT_ATTRS:
+                if name != 'last_report':
+                    setattr(self, name, 0 if name == 'last_edit_calls' else
+                            '' if name in ('last_budget_exhausted', 'last_rollback_stage') else None)
+            self.last_files, self.last_deleted = {}, []
+            fps = [normalize_researcher_footprint(c[3]) or
+                   normalize_researcher_footprint(getattr(idea, 'footprint', None)) for c in valid]
+            if not all(fp is not None and type(fp.get('gpus')) is int for fp in fps):
+                raise ConfigRefusal('native pilot requires an explicit candidate or idea GPU envelope (0 for CPU)')
+            self.last_footprint = {'gpus': max(fp['gpus'] for fp in fps),
+                'gpu_mem_mib': (max(fp['gpu_mem_mib'] for fp in fps)
+                    if all(type(fp.get('gpu_mem_mib')) is int for fp in fps) else None)}
+            self.last_edit_calls = sum(c[5].get('last_edit_calls') or 0 for c in cands)
+            return pilot_rank([c[0] for c in valid], direction=self.direction,
+                              pilot=self.pilot, assets=self.pilot_assets)
         best_score = max(c[4] for c in cands)
         top = [c for c in cands if c[4] >= best_score - 1e-9]
         chosen = top[0]

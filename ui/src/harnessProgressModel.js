@@ -4,6 +4,13 @@ const count = value => Number.isSafeInteger(value) && value >= 0
 const text = value => typeof value === 'string' && !!value
 const strings = value => Array.isArray(value) && value.every(text)
 const optionalText = value => value == null || typeof value === 'string'
+const timing = value => value == null || isRecord(value)
+  && ['evaluator_return_seconds', 'post_evaluator_seconds'].every(key =>
+    typeof value[key] === 'number' && Number.isFinite(value[key]) && value[key] >= 0)
+  && typeof value.advisory_review === 'string' && value.resource_occupancy === 'not_measured'
+const closure = value => isRecord(value) && value.type === 'closure'
+  && value.disposition === 'ended_before_decision' && value.review_status === 'unreviewed'
+  && value.answerer === 'engine' && text(value.reason)
 const question = value => isRecord(value) && text(value.checkpoint_id) && text(value.phase_id)
   && count(value.node_id) && count(value.node_generation)
   && ['stage', 'expectation', 'observation'].every(key => optionalText(value[key]))
@@ -32,6 +39,15 @@ export function validHarnessProgress(value, offset = 0) {
       || typeof value.pending_checkpoints_truncated !== 'boolean'
       || value.pending_checkpoints_truncated !== (value.pending_checkpoint_count > value.pending_checkpoints.length)
       || !isRecord(value.history)) return false
+  if (value.unreviewed_monitor_count != null || value.unreviewed_monitor_observations != null
+      || value.unreviewed_monitor_truncated != null) {
+    if (!count(value.unreviewed_monitor_count) || !Array.isArray(value.unreviewed_monitor_observations)
+        || value.unreviewed_monitor_observations.length !== Math.min(value.unreviewed_monitor_count, 100)
+        || !value.unreviewed_monitor_observations.every(row => isRecord(row) && question(row.question)
+          && row.answer == null && closure(row.closure))
+        || typeof value.unreviewed_monitor_truncated !== 'boolean'
+        || value.unreviewed_monitor_truncated !== (value.unreviewed_monitor_count > 100)) return false
+  }
   return ['decisions', 'reviews', 'checkpoints'].every(kind => {
     const page = value.history[kind]
     return isRecord(page) && count(page.total) && page.offset === offset && page.limit === 20
@@ -46,6 +62,9 @@ export function validHarnessProgress(value, offset = 0) {
           && (receipt.at_node == null || count(receipt.at_node))
           && (row.answer == null || isRecord(row.answer)
             && ['verdict', 'reason'].every(key => optionalText(row.answer[key])))
+          && (row.closure == null || row.answer == null && closure(row.closure))
+          && (row.status !== 'ended_before_decision' || row.closure != null)
+          && timing(row.execution_timing)
       })
   })
 }

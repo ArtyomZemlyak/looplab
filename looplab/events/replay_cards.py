@@ -19,6 +19,8 @@ re-exports the names tests import off it and merges `HANDLERS` into its dispatch
 """
 from __future__ import annotations
 
+from looplab.events.types import EV_CLAIM_REVIEWED
+
 import math
 
 from looplab.core.concepts import bounded_raw_concept_values
@@ -624,7 +626,24 @@ def _close_card_build_request(st: RunState, request_index: int, outcome: str) ->
 # This family's rows of the fold's dispatch table. `replay.py::_HANDLERS` is assembled from every
 # family's table and refuses a type two of them claim, so a board handler is registered HERE,
 # beside its body, and nowhere else. Both drop spellings share one handler, as they always did.
+def _on_claim_reviewed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    from looplab.core.claim_premises import valid_record
+    value = d.get('review')
+    subject = value.get('subject') if isinstance(value, dict) else None
+    key = subject.get('id') if isinstance(subject, dict) else None
+    if not isinstance(key, str) or not key or len(key) > 256:
+        return
+    if key not in st.claim_reviews and len(st.claim_reviews) >= 4096:
+        return
+    actor = d.get('actor_kind')
+    valid = valid_record(value) and actor in ('local_operator', 'deployment_owner', 'harness_agent')
+    # An invalid latest record is a tombstone, never fallback to an older scientific interpretation.
+    st.claim_reviews[key] = {'review': value if valid else None, 'seq': e.seq,
+                            'actor_kind': actor if valid else 'unknown'}
+
+
 HANDLERS = {
+    EV_CLAIM_REVIEWED: _on_claim_reviewed,
     EV_HYPOTHESIS_RANKED: _on_hypothesis_ranked,
     EV_HYPOTHESIS_MERGED: _on_hypothesis_merged,
     EV_HYPOTHESIS_ADDED: _on_hypothesis_added,

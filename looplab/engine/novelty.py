@@ -427,27 +427,25 @@ class NoveltyGateMixin:
         finally:
             _PROPOSAL_EVENT_SINK.reset(token)
 
-    def _publish_proposal_events(self, rows) -> int:
-        """Append a buffered proposal audit prefix from the MAIN TASK. Returns how many landed.
-
-        THE ONE PLACE THE 4-TUPLE IS UNPACKED. It was hand-written at four sites — the two offloaded
-        lanes' `finally` blocks and `speculation.py`'s two `result.audit_events` loops — and the
-        batch wrapper's own docstring stated the sole-writer rule it then re-implemented one lane
-        over. Four copies are four chances to forget a field: a fifth tuple member, or a
-        tail-fenced `append_many`, would have to land in all of them or silently diverge.
-
-        POLICY STAYS AT THE CALL SITES, deliberately. Layer 5 publishes a raw stage's prefix only on
-        the branches where the work was really handed on (an attach refusal COMMITS it — the paid
-        call happened; a stale-fence refusal DROPS it — the proposal is being abandoned and remade),
-        while the two offload lanes publish unconditionally because a refused proposal is exactly
-        when the receipt matters most (`bd182357`). This helper carries the mechanics, not the
-        election: `if` lives one level up, in both directions.
-        """
-        landed = 0
+    @staticmethod
+    def _proposal_event_records(rows):
+        """Decode the one buffered audit tuple into aligned event records and producer contexts."""
+        records, contexts = [], []
         for event_type, data, trace_id, span_id in (rows or ()):
+            records.append((event_type, data))
+            contexts.append((trace_id, span_id))
+        return records, contexts
+
+    def _publish_proposal_events(self, rows) -> int:
+        """Publish buffered audit from the main task, preserving each producer trace/span.
+
+        The tuple decoder is shared with atomic Card staging. Policy remains at the callers:
+        a stale raw proposal is abandoned; a failed proposal or attach records the paid work.
+        """
+        records, contexts = self._proposal_event_records(rows)
+        for (event_type, data), (trace_id, span_id) in zip(records, contexts):
             self.store.append(event_type, data, trace_id=trace_id, span_id=span_id)
-            landed += 1
-        return landed
+        return len(records)
 
     async def _offload_under_proposal_sink(self, fn, **run_sync_kwargs):
         """Run a paid proposal on the proposal pool, under the sink, and publish on the way OUT.

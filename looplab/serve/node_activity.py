@@ -18,6 +18,12 @@ from looplab.core.models import NodeStatus, RunState
 NODE_ACTIVITY_SCHEMA = 1
 
 
+def public_node_times(node) -> dict:
+    """Publish event-derived times without changing replay snapshots or digests."""
+    return {key: _started_at(getattr(node, key, None)) if node is not None else None
+            for key in ('created_at', 'eval_started_at', 'completed_at')}
+
+
 def _build_marker(state: RunState, node_id: int) -> Optional[Mapping[str, Any]]:
     """Return this node's current build marker, including legacy singular projections."""
 

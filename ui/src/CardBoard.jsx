@@ -1,3 +1,4 @@
+import ClaimPremiseNotice from './ClaimPremiseNotice.jsx'
 import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 // The Card board — the authoritative kanban plus the legacy hypothesis fallback it degrades to —
 // lifted out of panels.jsx (doc 25 UI-04). It carries a whole optimistic-control mini-framework
@@ -373,6 +374,7 @@ function _CardKanbanCard({
           {concepts.slice(0, 3).map(concept => <span key={concept} className="chip xs">{concept}</span>)}
         </span>}
       </button>
+      <ClaimPremiseNotice review={card.premise_review} compact />
       {isRecord(controlState?.notice) && <div
         className={'card-control-feedback ' + (controlState.notice.tone || '')}
         role={controlState.notice.tone === 'error' ? 'alert' : 'status'} aria-live="polite">
@@ -381,6 +383,7 @@ function _CardKanbanCard({
   }
   return <article className="card-kanban-card" data-card-id={card.id} aria-label={statement}
     aria-busy={ownPending ? 'true' : undefined}>
+    <ClaimPremiseNotice review={card.premise_review} />
     <div className="card-kanban-stmt">
       <span className="hyp-src" title={((source ? uiMessage("source: {0}", [source]) : uiText('source unavailable')))}>
         <OpIcon name={_CARD_ICON[source] || 'dot'} size={12} />

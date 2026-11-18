@@ -31,13 +31,22 @@ export default function HarnessCycleBody({ progress, fresh, runId, offset, setOf
     const oldCurrent = !current && ['current', 'current_evidence_for_idea'].includes(status)
     return <li key={`${kind}-${receipt.action_id || receipt.checkpoint_id || index}`} className="ov-row">
       <b>{receipt.phase_id || (ru ? journalNames[kind] : kind)}</b>{' '}
-      <span className="chip" title={uiText(status)}>{((ru ? (statuses[status] || uiText(status)) : uiText(status)))}
+      <span className="chip" title={uiText(status)}>{status === 'ended_before_decision'
+        ? t('command ended; review unresolved', 'команда завершилась; наблюдение не разобрано')
+        : ((ru ? (statuses[status] || uiText(status)) : uiText(status)))}
         {oldCurrent ? t(' at last read', ' при последнем чтении') : ''}</span>{' '}
       {row.lifecycle === 'superseded' && <span className="chip">{t('old evaluator attempt', 'предыдущая попытка оценки')}</span>}
       {receipt.at_node != null && <span className="muted">{t('at node', 'на эксперименте')} {receipt.at_node} · </span>}
       {receipt.stage && <span>{receipt.stage} · </span>}
       {receipt.decision || answer?.verdict || ''}
       {(receipt.reason || answer?.reason) && <div>{receipt.reason || answer.reason}</div>}
+      {row.closure && <div>{t('The command returned before a decision. This observation has no review verdict.',
+        'Команда завершилась до решения. Вердикта по этому наблюдению нет.')}</div>}
+      {row.execution_timing && <div className="muted">
+        {t('Evaluator wall time:', 'Время до завершения оценщика:')} {row.execution_timing.evaluator_return_seconds}s ·{' '}
+        {t('after evaluator return:', 'после завершения оценщика:')} {row.execution_timing.post_evaluator_seconds}s.{' '}
+        {t('Resource occupancy was not measured.', 'Занятость ресурсов не измерена.')}
+      </div>}
       {(receipt.expectation || receipt.observation) && <details>
         <summary>{t('Observed checkpoint', 'Записанное наблюдение')}</summary>
         {receipt.expectation && <p>{t('Expected', 'Ожидалось')}: {receipt.expectation}</p>}
@@ -72,6 +81,10 @@ export default function HarnessCycleBody({ progress, fresh, runId, offset, setOf
       </li>)}</ul> : <p>{t('No configured idea-specific review at this node count.', 'На этом числе экспериментов разбор конкретной идеи не требуется.')}</p>}
       <h3>{t('Evaluation questions', 'Вопросы оценки')}</h3>
       <p>{progress.pending_checkpoint_count} {t('pending. Answers remain in the checkpoint history below.', 'без ответа. Ответы сохраняются в истории вопросов ниже.')}</p>
+      {progress.unreviewed_monitor_count > 0 && <p role="status">{t('Completed commands with unresolved observations:',
+        'Завершённые команды с неразобранными наблюдениями:')} {progress.unreviewed_monitor_count}.{' '}
+        {t('Evidence remains in the history below; completion does not approve it.',
+          'Свидетельства сохранены в истории ниже; завершение команды не означает одобрения.')}</p>}
       {progress.pending_checkpoints.map(row => <div key={row.question.checkpoint_id} className="ov-row">
         <b>{row.question.phase_id}</b> · {t('node', 'эксперимент')} {row.question.node_id} · {row.question.stage || t('live observation', 'наблюдение во время выполнения')}
         {row.question.expectation && <div>{row.question.expectation}</div>}

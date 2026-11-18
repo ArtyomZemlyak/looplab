@@ -47,6 +47,9 @@ Invariant #2 lives in this file: exactly ONE terminal event per node, emitted at
 attempt loop. Trust scans (reward-hack / code-leakage / critic) stay lazy, method-local imports."""
 from __future__ import annotations
 
+from looplab.core.cluster import ExecutorOutcomeUnknown
+from looplab.core.errors import ConfigRefusal as ClusterConfigRefusal
+
 import contextlib
 import contextvars
 import hashlib
@@ -1409,6 +1412,37 @@ def _canary_code_digest(node) -> str:
         option=orjson.OPT_SORT_KEYS)).hexdigest()
 
 
+def _canary_equivalence_digest(engine, a: "EvalAttempt", spec: Optional[dict]) -> str:
+    from looplab.core.evaluator_identity import canary_equivalence_digest
+    from looplab.engine.activation import ACTIVATION_MANIFEST_NAME
+    from looplab.engine.shared import engine_evaluator_digest
+
+    state = getattr(a, "state", None)
+    uid = getattr(state, "run_uid", None) if state is not None else None
+    ev_digest = engine_evaluator_digest(engine, run_uid=uid or None)
+    has_repo = bool(getattr(engine, "_repo_spec", None))
+    ws = getattr(engine, "workspace", None)
+    substrate = (
+        ws.substrate_fingerprint()
+        if has_repo and ws is not None and callable(getattr(ws, "substrate_fingerprint", None))
+        else {}
+    )
+    uses_pins = getattr(a, "uses_receipt", None) or getattr(a.node, "uses_attempts", None) or {}
+    return canary_equivalence_digest(
+        code=getattr(a.node, "code", ""),
+        files=getattr(a.node, "files", None),
+        deleted=getattr(a.node, "deleted", None),
+        activation_manifest_name=ACTIVATION_MANIFEST_NAME,
+        evaluator_digest=ev_digest,
+        canary_spec=spec,
+        node_kind=getattr(a.node, "kind", None),
+        uses=getattr(a.node, "uses", None),
+        uses_pins=uses_pins,
+        substrate_fp=substrate,
+        has_repo_spec=has_repo,
+    )
+
+
 def _repair_forces_full_retrain(res, next_start, *, rolled_back: bool = False) -> bool:
     """Does this repair discard completed EARLIER-stage work, i.e. does it count against the cap?
 
@@ -1619,6 +1653,7 @@ class EvalAttempt:
     """
     node_id: int
     max_es: Optional[float] = None
+    slot: Any = None
     sp: Any = None                            # the `evaluate` trace span the driver opened
     # `-1` until ADMIT binds the lifecycle; the containment handler names the lifecycle it closes
     # through this, and a re-fold there would read whatever generation is CURRENT at failure time.
@@ -1707,6 +1742,9 @@ class EvalAttempt:
     operator_card_dropped: bool = False
     aborted: bool = False
     attempt_eval_seconds: float = 0.0
+    evaluator_returned_at: Optional[float] = None
+    evaluator_return_seconds: float = 0.0
+    advisory_review_status: str = "not_required"
     ok: bool = False
     watchdog_reason: Any = None
     watchdog_err: str = ""
@@ -2018,6 +2056,9 @@ Historical incident details omitted.
         """
         row = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
                "invocation_id": a.invocation_id, "canary_ran": bool(a.canary_ran)}
+        if getattr(getattr(self, 'sandbox', None), 'requires_native_binding', False):
+            from looplab.engine.cluster_attempt import claim_record
+            row['executor_contract'] = claim_record(self, a)
         if a.invocation_id in a.unsettled_at_start:
             row["after_interrupted_attempt"] = True
         async with self._write_lock:
@@ -2038,6 +2079,15 @@ Historical incident details omitted.
         row = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
                "invocation_id": a.invocation_id, "outcome": outcome,
                "eval_seconds": round(float(seconds), 3)}
+        returned = getattr(a, "evaluator_returned_at", None)
+        if returned is not None:
+            row["execution_timing"] = {
+                "evaluator_return_seconds": a.evaluator_return_seconds,
+                "post_evaluator_seconds": round(max(0.0, time.time() - returned), 3),
+                "advisory_review": getattr(a, "advisory_review_status", "not_required"),
+                "resource_occupancy": "not_measured"}
+        if a.res is not None and getattr(a.res, 'executor_receipt', None):
+            row['executor_receipt'] = a.res.executor_receipt
         # Historical incident details omitted.
         if outcome == "ok" and a.res is not None:
             row["result"] = _settled.settled_result_record(
@@ -3580,7 +3630,7 @@ Historical incident details omitted.
         # stop into another attempt — `orchestrator.py`'s loop-signal rule, one method over). The
         # attempt record is a slots dataclass, so an attribute the phases never declared raises
         # instead of minting silently (`engine/attribute_sites.py`'s rule for the engine itself).
-        a = EvalAttempt(node_id=node_id, max_es=max_es)
+        a = EvalAttempt(node_id=node_id, max_es=max_es, slot=limiter)
         try:
             async with limiter:
                 with self.tracer.span("evaluate", new_trace=True, node_id=node_id) as sp:
@@ -3713,12 +3763,20 @@ Historical incident details omitted.
             await self._contain_eval_crash(node_id, a.generation, exc, a=a)
 
     def _yield_devices_for_repair(self, a: "EvalAttempt") -> None:
-        """Give this lifecycle's GPUs back while its repair talks to an LLM (`resources.py::
-        _yield_eval_devices`). A no-op for a lifecycle holding none."""
+        """Return devices and the admitted physical slot while repair talks to an LLM.
+
+        CPU lifecycles return width too; actual unpublished costs remain in the admission budget.
+        Direct phase probes with no dispatch ownership return only devices they really hold.
+        """
         if a.generation >= 0 and self._yield_eval_devices(a.node_id, a.generation):
             a.sp.set("devices_yielded_for_repair", True)
+        release = getattr(getattr(a, "slot", None), "release_for_repair", None)
+        if a.generation >= 0 and callable(release) and self._yield_eval_lane(
+                a.node_id, a.generation, a.prior_repair_seconds + a.total_eval):
+            release()
+            a.sp.set("eval_slot_yielded_for_repair", True)
 
-    async def _reclaim_devices_for_attempt(self, a: "EvalAttempt") -> bool:
+    async def _reclaim_devices_for_attempt(self, a: "EvalAttempt", slot=None) -> bool:
         """Before an attempt launches, take back whatever the repair gave up, and re-pin the env to
         the devices actually held now: they need not be the ones given up, and launching on the
         old ids would put this candidate on a sibling's GPU. True when devices were taken back —
@@ -3730,9 +3788,30 @@ Historical incident details omitted.
         given back — which a sibling held (driven on a 2-GPU pool: both launches `CVD=0`)."""
         if a.generation < 0:
             return False
+        key = (a.node_id, a.generation)
+        yielded = key in getattr(self, "_eval_repair_yielded", set())
+        if yielded:
+            await slot.reacquire()
+            from looplab.engine.eval_dispatch import _eval_time_admission_refused, _reserve_eval_time
+            from looplab.engine.repair_slots import occupied_lifecycles
+            while True:
+                epoch = self._gpu_pool_epoch()
+                current = fold(self.store.read_all())
+                physical_room = (getattr(slot, "semaphore", None) is not None
+                    or occupied_lifecycles(self, getattr(self, "_eval_inflight", ()))
+                       < max(1, int(self._eval_parallel)))
+                if current.total_eval_seconds + self._unsettled_eval_seconds() >= (a.max_es if a.max_es is not None else float("inf")):
+                    raise EvaluationAdmissionRefusal("eval_budget_exhausted", "Eval allowance exhausted while this lifecycle repaired; no further attempt launched")
+                if physical_room and not _eval_time_admission_refused(self, current, a.node, a.max_es):
+                    # No await between fresh admission and ownership: pending nodes and other repaired
+                    # lifecycles cannot consume the same slot or eval allowance on this event loop.
+                    self._eval_repair_yielded.discard(key)
+                    _reserve_eval_time(self, a.node_id, a.generation, a.node)
+                    break
+                await anyio.to_thread.run_sync(self._wait_for_gpu_change, epoch, abandon_on_cancel=True)
         back = await self._reclaim_eval_devices(a.node_id, a.generation)
         if back is None:
-            return False
+            return yielded
         a._resource_reservation = back
         a.eval_env = self._resource_eval_env(back, inherit_host=True)
         return True
@@ -3797,7 +3876,8 @@ Historical incident details omitted."""
 
     async def _record_eval_withheld(self, a: "EvalAttempt", at: str, seconds: float, *,
                                     reason: str = "paused",
-                                    verdict: "Optional[InfraVerdict]" = None) -> None:
+                                    verdict: "Optional[InfraVerdict]" = None,
+                                    executor_receipt=None) -> None:
         """The durable record of a withheld attempt (doc 69 69.12a): WHERE the pause (or a stop)
         held it (`EVAL_WITHHELD_POINTS`) and the eval seconds it had spent that NO other row carries
         — the lifecycle's next terminal charges them (`_durable_withheld_seconds`), or the
@@ -3820,6 +3900,7 @@ Historical incident details omitted."""
                 self.store.append(EV_EVAL_ATTEMPT_WITHHELD, {
                     "node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
                     "at": at, "reason": reason, "eval_seconds": spent,
+                    **({"executor_receipt": executor_receipt} if executor_receipt else {}),
                     # literal spreads, so the payload contract's writer scan sees both keys
                     **({"fault": verdict.fault} if verdict is not None and verdict.fault else {}),
                     **({"occupant": dict(verdict.occupant)}
@@ -4020,18 +4101,22 @@ Historical incident details omitted."""
         All four, in the order that costs least: the operator switched it on (`Settings.eval_canary`),
         the task has a command eval, the task DECLARES the canary's slice (`eval.canary`; without it
         a canary would be the full eval run twice), and the log holds no PASSED canary for this
-        node's lifecycle and exact code (the durable gate, invariant #3 — a resume, or a dependency
-        round that changed no code, does not re-run a canary already paid for)."""
+        node's lifecycle and exact code — or an equivalent sibling lifecycle sharing the full
+        `equivalence_digest` (the durable gate, invariant #3 — a resume, a dependency round that
+        changed no code, or an identical-contract sibling node does not re-run a canary already paid for)."""
         # ON BY DEFAULT FOR AN EXTERNAL-HARNESS RUN (doc 78 §5, audit incident G1): an external
         # agent's broken candidate (a CLI flag its script does not know) otherwise fails only
         # after the data preparation it is queued behind. The task's `eval.canary` declaration is
         # still what makes a canary possible — without it there is no slice to run.
         if not (self._eval_canary or getattr(self, "external_harness", False)) or not self._eval_spec:
             return False
-        if effective_canary_spec(self) is None:
+        spec = effective_canary_spec(self)
+        if spec is None:
             return False
-        return not canary_already_passed(self.store.read_all(), a.node_id, a.generation,
-                                         _canary_code_digest(a.node))
+        eq_digest = _canary_equivalence_digest(self, a, spec)
+        return not canary_already_passed(
+            self.store.read_all(), a.node_id, a.generation,
+            _canary_code_digest(a.node), equivalence_digest=eq_digest or None)
 
     def _effective_canary_spec(self) -> Optional[dict]:
         return effective_canary_spec(self)
@@ -4129,8 +4214,13 @@ Historical incident details omitted."""
         stopped it — the chain's `CanaryClock` or a stage's own cap — with no engine fault and no
         operator intervention, the one failure `_eval_run_canary` retries; `detail` is the sentence
         its finished row's `error` carries ("" on a pass or an engine fault)."""
+        # The retry's larger clock is a mechanical allowance, not a new declared contract.
+        identity_spec = self._effective_canary_spec() if retry else spec
+        equivalence_digest = _canary_equivalence_digest(self, a, identity_spec)
         started = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
                    "code_digest": digest, "timeout": spec["timeout"]}
+        if equivalence_digest:
+            started["equivalence_digest"] = equivalence_digest
         if spec.get("implicit"):
             started["implicit"] = "sandboxed"
         if retry:
@@ -4173,6 +4263,8 @@ Historical incident details omitted."""
         row = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
                "code_digest": digest, "passed": passed,
                "eval_seconds": seconds, "log_dir": str(scratch)}
+        if equivalence_digest:
+            row["equivalence_digest"] = equivalence_digest
         if retry:
             row["retry"] = retry
         if spec.get("implicit"):
@@ -4340,6 +4432,10 @@ Historical incident details omitted."""
         scope = launch_scope_error(self.run_dir, getattr(a.node, "job_role", None))
         if scope is not None:
             raise EvaluationAdmissionRefusal(scope["code"], scope["message"])
+        from looplab.engine.shared import launch_evaluator_error
+        eval_mismatch = launch_evaluator_error(self, a.node, a.state)
+        if eval_mismatch is not None:
+            raise EvaluationAdmissionRefusal(eval_mismatch["code"], eval_mismatch["message"])
         # ...and read by the containment handler at the top through `a.generation`, which has no
         # other way to name the lifecycle it is closing. Re-folding there would read whatever
         # generation is CURRENT at failure time, which after a concurrent reset is a different
@@ -4640,7 +4736,11 @@ Historical incident details omitted."""
                 "No stage ran and the workdir is preserved. Inspect the changed inputs/outputs; "
                 "a full pipeline requires an explicit retry from_stage=eval and fresh admission checks.")
         if not _reuse:
-            seed = self._materialize(a.node, a.workdir)
+            from looplab.core.retry_inputs import RetryInputPreflightError
+            try:
+                seed = self._materialize(a.node, a.workdir)
+            except RetryInputPreflightError as exc:
+                raise EvaluationAdmissionRefusal(exc.code, str(exc)) from exc
             a.base_revision = ({**seed, "node_id": a.node_id, "generation": a.generation}
                                if isinstance(seed, dict) else None)
         else:
@@ -4875,6 +4975,10 @@ Historical incident details omitted."""
         scope = launch_scope_error(self.run_dir, getattr(a.node, "job_role", None))
         if scope is not None:
             raise EvaluationAdmissionRefusal(scope["code"], scope["message"])
+        from looplab.engine.shared import launch_evaluator_error
+        eval_mismatch = launch_evaluator_error(self, a.node, a.state)
+        if eval_mismatch is not None:
+            raise EvaluationAdmissionRefusal(eval_mismatch["code"], eval_mismatch["message"])
         a.res = None
         a.canary_failed = False
         a.canary_failed_stage = None
@@ -4892,7 +4996,7 @@ Historical incident details omitted."""
              and (self._pause_withholds_attempt(a, box_fault=True) if infra_paused
                   else self._pause_withholds_attempt(a, run=_run_now) if _run_now.halted
                   else self._pause_withholds_attempt(a)))
-                or (await self._reclaim_devices_for_attempt(a)
+                or (await self._reclaim_devices_for_attempt(a, a.slot)
                     and self._pause_withholds_attempt(a))):
             a.sp.set("eval_withheld", "paused_before_launch")
             _LOG.info("node %s: attempt %s withheld — the run was paused before it launched",
@@ -4963,7 +5067,10 @@ Historical incident details omitted."""
         # nothing inside it consults them.
         a._seen: dict = {}
         a.kill_signal: dict = {}       # filled by the training monitor if it kills a broken run (Phase 3)
-        a._live_questions = []         # opened external observations must be answered before terminal
+        a._live_questions = []         # terminal settlement preserves unanswered observations separately
+        a.evaluator_returned_at = None
+        a.evaluator_return_seconds = 0.0
+        a.advisory_review_status = "not_required"
         a._external_observed_phases = set()
         # The Card identity this worker can be dropped through, read while `node` is still
         # the fold this attempt started from — it is not rebound until after the group.
@@ -5053,6 +5160,16 @@ Historical incident details omitted."""
             a.invocation_id = eval_invocation_id(
                 run_ref(getattr(a.state, "run_uid", ""), getattr(a.state, "run_id", "")),
                 a.node_id, a.generation, a.attempt)
+            if getattr(getattr(self, 'sandbox', None), 'requires_native_binding', False):
+                from looplab.engine.cluster_attempt import reconcile_previous, withhold_unknown
+                try:
+                    await reconcile_previous(self, a)
+                except ExecutorOutcomeUnknown as exc:
+                    cancel.set()
+                    _tg.cancel_scope.cancel()
+                    with anyio.CancelScope(shield=True):
+                        await withhold_unknown(self, a, exc)
+                    return PHASE_RETURN
             await self._claim_eval_invocation(a)
             if self.external_harness and getattr(self, "_eval_spec", None):
                 from looplab.engine.external_watch import observe_external_eval
@@ -5061,9 +5178,22 @@ Historical incident details omitted."""
                     if _enabled:
                         _tg.start_soon(observe_external_eval, self, a, cancel, _phase)
             try:
-                a.res = await anyio.to_thread.run_sync(
-                    self._run_eval, a.node, str(a.workdir), a.eval_env, None, cancel, a.next_start
-                )
+                if getattr(getattr(self, 'sandbox', None), 'requires_native_binding', False):
+                    from looplab.engine.cluster_attempt import run_attempt
+                    a.res = await anyio.to_thread.run_sync(run_attempt, self, a, cancel)
+                else:
+                    a.res = await anyio.to_thread.run_sync(
+                        self._run_eval, a.node, str(a.workdir), a.eval_env, None, cancel, a.next_start)
+
+                a.evaluator_returned_at = time.time()
+                a.evaluator_return_seconds = round(a.evaluator_returned_at - a._t0, 3)
+            except ExecutorOutcomeUnknown as exc:
+                cancel.set()
+                _tg.cancel_scope.cancel()
+                with anyio.CancelScope(shield=True):
+                    from looplab.engine.cluster_attempt import withhold_unknown
+                    await withhold_unknown(self, a, exc)
+                return PHASE_RETURN
             except RunSetupRefusal:
                 # The run's environment never came up: `_run_eval` runs `_ensure_run_setup` BEFORE
                 # any evaluator command, so this claim's evaluator was never invoked — settle it as
@@ -5073,6 +5203,12 @@ Historical incident details omitted."""
                 with anyio.CancelScope(shield=True):
                     await self._settle_eval_invocation(
                         a, "setup_refused", round(time.time() - a._t0, 3))
+                raise
+            except ClusterConfigRefusal:
+                if getattr(getattr(self, 'sandbox', None), 'requires_native_binding', False):
+                    with anyio.CancelScope(shield=True):
+                        await self._settle_eval_invocation(
+                            a, 'setup_refused', round(time.time() - a._t0, 3))
                 raise
             except GpuPinUnenforceable as exc:
                 # Fail-closed device pin the Docker daemon/runtime cannot enforce. Terminalize
@@ -6780,6 +6916,8 @@ Historical incident details omitted."""
                     _eval_payload["task_metric"] = None
                 # THE CANDIDATE'S OWN NUMBER (doc 52 row 10a), only on a host-scored node that
                 # printed one — absent otherwise, on the rule the two keys below state.
+                if getattr(a.res, 'executor_receipt', None):
+                    _eval_payload['executor_receipt'] = a.res.executor_receipt
                 if getattr(a.res, "self_metric", None) is not None:
                     _eval_payload["self_metric"] = a.res.self_metric
                 # WHAT THE EVAL SAID ABOUT THE NUMBER IT JUST PRODUCED. Same additive,
@@ -6863,7 +7001,7 @@ Historical incident details omitted."""
                 # Historical incident details omitted.
                 if isinstance(getattr(a.res, "activation", None), dict):
                     _eval_payload["activation"] = a.res.activation
-                self.store.append(EV_NODE_EVALUATED, _eval_payload)
+                _evaluated_event = self.store.append(EV_NODE_EVALUATED, _eval_payload)
                 # WHAT THE TRAINING PROCESS SAID IT RAN AT (`runtime/effective_batch.py`), bound at
                 # the metric read beside the applied coordinates and recorded as its own diagnostic
                 # row. `docs/45-claim-surfaces-2026-08-20.md` §3.2 refused `auto_find_batch_size` as
@@ -6894,6 +7032,33 @@ Historical incident details omitted."""
                         "files_seen": int(_batch.get("files_seen") or 0),
                         "truncated": bool(_batch.get("truncated")),
                     })
+                # Deterministic scalar-behavior observation, kept separate from code/cheating scans.
+                # No paid call, selection gate, lesson verdict, or evaluation is created here.
+                from looplab.core.metric_behavior import metric_behavior_scan
+                from looplab.events.types import EV_METRIC_BEHAVIOR_SCAN
+                observed = a.node.model_copy(update={**{key: value for key, value in _eval_payload.items()
+                    if key in type(a.node).model_fields}, 'status': NodeStatus.evaluated,
+                    'terminal_event_seq': _evaluated_event.seq,
+                    'feasible': not bool(_eval_payload['violations'])})
+                _behavior = metric_behavior_scan(
+                    observed, a.state.nodes.values(), aborted=a.state.aborted_nodes)
+                self.store.append(EV_METRIC_BEHAVIOR_SCAN, {
+                    'authority': _behavior['authority'],
+                    'checked_metrics': _behavior['checked_metrics'],
+                    'detector': _behavior['detector'],
+                    'evidence_digest': _behavior['evidence_digest'],
+                    'generation': _behavior['generation'],
+                    'limits': _behavior['limits'],
+                    'node_id': _behavior['node_id'],
+                    'parameters': _behavior['parameters'],
+                    'question': _behavior['question'],
+                    'references': _behavior['references'],
+                    'shifted_metrics': _behavior['shifted_metrics'],
+                    'status': _behavior['status'],
+                    'strongest_shifts': _behavior['strongest_shifts'],
+                    'subject': _behavior['subject'],
+                    'version': _behavior['version'],
+                })
                 # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
                 # emission does not rewrite the metric, but the folded trust_gate policy
                 # can exclude high-precision signals from champion/breeding under gate/block.

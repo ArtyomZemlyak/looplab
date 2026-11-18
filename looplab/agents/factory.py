@@ -40,7 +40,7 @@ from looplab.agents.providers import _make_abstractor, _memora_cache_path, _shar
 # import function-local, so the cycle stays exactly as open as before.
 from looplab.agents.developer_backends import (  # noqa: F401
     _agent_model, best_of_n_developer, developer_prompt_truths_enabled, external_cli_developer,
-    in_house_repo_developer)
+    in_house_repo_developer, native_pilot_preflight, _hypotheses_enabled)
 from looplab.core.prompts import PromptStore
 
 if TYPE_CHECKING:                      # `adapters.tasks` re-exports from HERE, so a runtime import
@@ -222,18 +222,6 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
                         loop_opts=loop_opts_from_settings(settings))   # B1 stuck + C1 plan + C2 summary
 
 
-def _hypotheses_enabled(settings) -> bool:
-    """`Settings.diagnosis_hypotheses`, read through the ONE reader that owns it.
-
-    Function-local import because that reader lives beside the coercion it pairs with
-    (`engine/failure_diagnosis.py::hypotheses_enabled`) and `agents` may reach `engine` only inside
-    a call — the documented deferred edge, not a new module-level dependency.
-    """
-    from looplab.engine.failure_diagnosis import hypotheses_enabled
-
-    return hypotheses_enabled(settings)
-
-
 def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: str = "developer"):
     """Pick role backends from config (ADR-7): toy optimizer or a live LLM. When a
     knowledge_dir is configured, the LLM Researcher is wrapped with the agentic
@@ -242,6 +230,9 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     `run_dir` (the live run's directory) is threaded through purely to enable the cross-run sibling
     tools; it is None for unit-built roles and the developer-only `make_developer_factory` rebuild, so
     those paths get the legacy single-run view (byte-parity)."""
+    if getattr(settings, "best_of_n_pilot", None) is not None:
+        native_pilot_preflight(task, settings,
+            param_search=bool(getattr(task, "params", None)) and callable(getattr(task, "repo_spec", None)))
     if settings.backend != "llm":
         roles = task.build_roles()
         from looplab.agents.toy_roles import ToyResearcher

@@ -20,8 +20,8 @@ from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
 async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bool = False) -> None:
     """Publish changed, attributed live evidence and wait for a deliberate answer.
 
-    No agent process or internal model is launched. An already finished evaluator
-    must still account for each opened question before its terminal is committed.
+    No agent process or internal model is launched. A final observation is preserved without
+    waiting for a decision about a process that has already returned.
     """
     # the external agent's checkpoints: an engine reach into the harness taken only in an
     # external_harness run (`tests/test_package_layering.py` DEFERRED, engine -> harness)
@@ -123,7 +123,7 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
             observation = prefix + text[-(6000 - len(prefix)):]
             # The evaluator can finish while ask() is in the worker thread. Keep the durable
             # question and its in-process tracking together: cancellation between them would
-            # otherwise commit a node whose newly opened question was never answered.
+            # otherwise commit a node whose newly opened question was never accounted for.
             with anyio.CancelScope(shield=True):
                 question = await anyio.to_thread.run_sync(
                     lambda: ask(engine.run_dir, a.node_id, a.generation, phase,
@@ -135,6 +135,8 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
                 observed_phases.add(phase)
                 a._external_observed_phases = observed_phases
                 a._live_questions.append(question["checkpoint_id"])
+            if final_pass:
+                return  # completion settlement records unanswered review separately from execution
             while not cancel.is_set():
                 answer = await anyio.to_thread.run_sync(
                     lambda: answer_for(engine.run_dir, question["checkpoint_id"]),
@@ -235,14 +237,17 @@ def attempt_failed(res, node=None, objective_key=None, run_direction=None) -> bo
 
 
 async def settle_external_observations(engine, a) -> None:
-    """A completed evaluator cannot silently outrun an unanswered live tick."""
+    """A returned evaluator preserves unanswered observations without waiting for advisory review."""
     # the external agent's checkpoints: an engine reach into the harness taken only in an
     # external_harness run (`tests/test_package_layering.py` DEFERRED, engine -> harness)
-    from looplab.harness.checkpoints import answer_for, close_unanswered
+    from looplab.harness.checkpoints import close_completed_observations, close_unanswered
     from looplab.engine.evaluate import _watch_limiter
 
     if a._seen.get("kind"):
         return  # explicit operator abort/reset owns the lifecycle
+    result = getattr(a, "res", None)
+    if result is None or getattr(result, "exit_code", None) is None:
+        return  # an incomplete/unknown result does not prove that the process ended
     if attempt_failed(getattr(a, "res", None), getattr(a, "node", None),
                       objective_key=getattr(getattr(a, "state", None), "objective_key", None),
                       run_direction=getattr(getattr(a, "state", None), "direction", None)):
@@ -261,19 +266,10 @@ async def settle_external_observations(engine, a) -> None:
         except Exception:  # noqa: BLE001 — a ledger failure must not hold a failed terminal back
             pass
         return
-    for checkpoint_id in a._live_questions:
-        while True:
-            try:
-                answer = await anyio.to_thread.run_sync(
-                    lambda: answer_for(engine.run_dir, checkpoint_id), limiter=_watch_limiter())
-            except Exception:  # noqa: BLE001 — an unavailable ledger is not approval
-                answer = None
-            if answer is not None:
-                break
-            intervened = await anyio.to_thread.run_sync(
-                lambda: engine._eval_intervention_seen(
-                    a.node_id, a.generation, a.start_seq,
-                    getattr(a.node.idea, "card_id", None)), limiter=_watch_limiter())
-            if intervened:
-                return
-            await anyio.sleep(0.3)
+    try:
+        await anyio.to_thread.run_sync(
+            lambda: close_completed_observations(engine.run_dir, list(a._live_questions),
+                                                 a.node_id, a.generation), limiter=_watch_limiter())
+        a.advisory_review_status = "recorded"
+    except Exception:  # noqa: BLE001 — unavailable evidence is not review approval or a terminal barrier
+        a.advisory_review_status = "evidence_unavailable"

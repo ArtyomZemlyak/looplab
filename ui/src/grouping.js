@@ -109,6 +109,16 @@ export function rerouteForCollapse(nodesObj, collapsed, nodeGroup) {
     seen.add(key)
     edges.push({ source: S, target: T, srcId: p, dstId: n.id })
   }))
+  Object.values(nodesObj).forEach(n => (n.uses || []).forEach(p => {
+    if (!(p in nodesObj)) return
+    const S = endpoint(p), T = endpoint(n.id)
+    if (S === T) return
+    const key = S + '>' + T
+    if (seen.has(key)) return
+    seen.add(key)
+    // Artifact dependencies are real lineage, but not proof of scientific parentage.
+    edges.push({ source: S, target: T, srcId: p, dstId: n.id, relation: 'uses' })
+  }))
   return { hidden, edges }
 }
 

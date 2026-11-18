@@ -180,14 +180,15 @@ def test_the_inert_structured_claims_knob_no_longer_reaches_the_engine(tmp_path)
     """Review 2026-09-22, ENG3-08 (doc 25 EM-06, phase 1). `cross_run_structured_claims` was
     relayed Settings -> EngineOptions -> an Engine attribute -> `structured=` on two claim
     projections that ignore it: a live knob naming a projection deleted on 2026-09-08. The relay is
-    gone. The Settings field still PARSES — an old snapshot pins it False and `LOOPLAB_*` env may
-    set it — and is simply not read; it leaves with the calibration digest in phase 2."""
+    gone. Phase2 retires the active Settings field while old snapshots remain readable through
+    RETIRED_SETTINGS; the historical inert v1 calibration identity slot stays fixed."""
     import pytest
 
     assert "cross_run_structured_claims" not in EngineOptions.__dataclass_fields__
     with pytest.raises(TypeError, match="cross_run_structured_claims"):
         _mk_engine(tmp_path / "r", cross_run_structured_claims=True)
-    pinned = Settings(cross_run_structured_claims=False)          # a pre-field snapshot's pin
+    pinned = Settings(cross_run_structured_claims=False)          # ignored historical input
+    assert not hasattr(pinned, "cross_run_structured_claims")
     assert EngineOptions.from_settings(pinned) == EngineOptions.from_settings(Settings())
     assert not hasattr(_mk_engine(tmp_path / "r2"), "_cross_run_structured_claims")
 

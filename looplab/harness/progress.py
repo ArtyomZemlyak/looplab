@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
+from hashlib import sha256
+from urllib.parse import quote, urlencode
 
 from fastapi import HTTPException
 
@@ -68,7 +70,7 @@ def _policy_preview(settings, state) -> dict:
 OPERATOR_DIRECTIONS_SHOWN = 6
 
 
-def _operator_directions(state) -> dict:
+def _operator_directions(state, *, events=(), run_id=None, generation=None) -> dict:
     """The operator's standing directions for an EXTERNAL run (codex audit 2026-10-14 L-15).
 
     The Research panel's "use this direction" and the Assistant queue a `hint`; on an internal run
@@ -76,11 +78,52 @@ def _operator_directions(state) -> dict:
     the agent — the steer was accepted, folded and read by nobody. Advisory and read-only: it is
     the operator's wish, not an obligation the candidate gate checks, and the newest wins on
     conflict exactly as it does for the internal roles."""
-    from looplab.core.hint_directives import operator_directive_texts
-    texts = operator_directive_texts(getattr(state, "pending_hints", None))
+    from looplab.core.hint_directives import operator_directive_rows
+    rows = operator_directive_rows(getattr(state, "pending_hints", None))
+    texts = [str(row["text"]).strip() for row in rows]
     shown = texts[-OPERATOR_DIRECTIONS_SHOWN:]
+    def source_key(row):
+        return (str(row["text"]).strip(), row.get("directive_id"), row.get("topic"))
+    wanted = {source_key(row) for row in rows[-OPERATOR_DIRECTIONS_SHOWN:]}
+    sources = {}
+    for event in reversed(events):
+        candidates = operator_directive_rows([event.data]) if event.type == "hint" else []
+        if candidates:
+            key = source_key(candidates[0])
+            if key in wanted and key not in sources:
+                sources[key] = event.seq
+        if len(sources) == len(wanted):
+            break
+    details = []
+    for index, row in enumerate(rows[-OPERATOR_DIRECTIONS_SHOWN:]):
+        text = str(row["text"]).strip()
+        seq = sources.get(source_key(row))
+        reference = None
+        if seq is not None and run_id is not None and generation is not None:
+            reference = f"/api/runs/{quote(run_id, safe='')}/log-page?" + urlencode({
+                "direction": "around", "anchor_seq": seq, "limit": 1,
+                "byte_limit": 524288, "generation": generation})
+        details.append({"index": index, "characters": len(text), "shown_characters": min(len(text), 2000),
+                        "text_truncated": len(text) > 2000, "text_sha256": sha256(text.encode()).hexdigest(),
+                        "event_seq": seq, "full_ref": reference})
+    text_truncated = any(item["text_truncated"] for item in details)
+    ledger = getattr(state, "operator_direction_ledger", {})
+    active = sorted((row for row in ledger.values() if row["status"] == "active"), key=lambda row: row["event_seq"])
+    retired = sorted((row for row in ledger.values() if row["status"] != "active"), key=lambda row: row.get("retired_seq", -1))
+    records = [{k: row[k] for k in ("directive_id", "topic", "text", "status", "event_seq", "supersedes")}
+               for row in active[-OPERATOR_DIRECTIONS_SHOWN:]]
     return {"items": [text[:2_000] for text in shown], "total": len(texts),
-            "truncated": len(texts) > len(shown),
+            "truncated": len(texts) > len(shown) or text_truncated,
+            "window_truncated": len(texts) > len(shown), "text_truncated": text_truncated,
+            "item_details": details,
+            "read_warning": ("A direction is a shortened prefix. Read its generation-bound full_ref before acting; "
+                             "verify the hint event sequence and SHA-256 of its stripped UTF-8 text. "
+                             "An omitted event is unavailable, not a complete direction. Refresh progress before action."
+                             if text_truncated else None),
+            "directives": records, "active_scoped_count": len(active),
+            "retired": [{k: row.get(k) for k in ("directive_id", "topic", "status", "retired_seq", "superseded_by")}
+                        for row in retired[-OPERATOR_DIRECTIONS_SHOWN:]],
+            "retired_count": len(retired), "retired_truncated": len(retired) > OPERATOR_DIRECTIONS_SHOWN,
             "meaning": "standing operator directions, oldest first; the last one wins on conflict. "
                        "Advisory: weigh them when choosing the next experiment; they are not a "
                        "candidate permit and no gate checks them"}
@@ -130,7 +173,7 @@ def _page(rows: list[dict], offset: int, limit: int) -> dict:
 
 
 def snapshot(rd: Path, expected_generation: str, *, activity_reader,
-             offset: int = 0, limit: int = 20, language: str = "en") -> dict:
+             offset: int = 0, limit: int = 20, language: str = "en", root: Path | None = None) -> dict:
     store = EventStore(rd / "events.jsonl")
     events = store.read_all()
     generation = run_generation_token(events)
@@ -184,6 +227,7 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
               "decisions": decision_health, "reviews": review_health,
               "checkpoints": checkpoint_health}
     pending = [row for row in checkpoint_rows if row["status"] == "pending"]
+    unreviewed = [row for row in checkpoint_rows if row.get("review_status") == "unreviewed"]
     finish_due = external_finish_due(rd, settings, state, events, review_rows=reviews)
     # Reuse the server's public node projection on THIS event prefix, including
     # pause-withheld evaluations. Keep the dependency downward: the route supplies
@@ -197,7 +241,14 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
                  "recorded_node_counts": {kind: activity[kind] for kind in
                      ("building", "queued", "evaluating", "pending")}}
     from looplab.harness.campaign import read_policy
+    from looplab.harness.work_state import project as project_work_state
+    from looplab.harness.telemetry import project as project_telemetry
+    from looplab.harness.work_claims import project as project_work_claims
+    from looplab.core.run_ref import run_address
+    from looplab.engine.shared import run_dir_evaluator_digest
+    canonical_id = run_address(root if root is not None else rd.parent, rd)
     result = {"generation": generation, "run_uid": uid,
+            "current_evaluator_digest": run_dir_evaluator_digest(rd, run_uid=uid or None),
             "execution_scope": read_policy(rd).get("execution")
                                  or {"mode": "science", "version": 1},
             "recorded_lifecycle": {"paused": bool(state.paused),
@@ -218,8 +269,14 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
             "finish_report_due": finish_due["report"],
             "finish_pending_nodes": finish_due["pending_nodes"],
             "execution": execution,
-            "operator_directions": _operator_directions(state),
+            "operator_directions": _operator_directions(state, events=events, run_id=canonical_id, generation=generation),
+            "external_work_state": project_work_state(events, state, generation, canonical_id),
+            "work_intents": project_work_claims(events, state, generation, canonical_id),
+            "external_telemetry": project_telemetry(events, state, generation),
             "canary_preflight": canary_preflight(rd),
+            "unreviewed_monitor_count": len(unreviewed),
+            "unreviewed_monitor_observations": unreviewed[:100],
+            "unreviewed_monitor_truncated": len(unreviewed) > 100,
             "pending_checkpoint_count": len(pending),
             "pending_checkpoints": pending[:100],
             "pending_checkpoints_truncated": len(pending) > 100,

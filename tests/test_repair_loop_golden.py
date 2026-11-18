@@ -32,6 +32,10 @@ WHAT THE SCENARIOS COVER, by the rule each one reaches:
     host scorer, evaluation inputs, applied coordinates, extra metrics with channel and direction,
     the candidate's own number, and a drift report.
 
+2026-11-12: the new metric-behavior observation and the earlier execution-timing metadata were
+added to the record. Removing only those additive fields/events reproduces every previous row
+and payload key order exactly. Clock values remain masked with their keys retained.
+
 REGENERATE ONLY FOR AN INTENDED CHANGE TO WHAT THE LOOP WRITES, and read the diff first — this file
 exists to notice the unintended one:
 
@@ -67,11 +71,12 @@ _LOOP_EVENT_TYPES = frozenset({
     "eval_invocation_settled", "full_retrain_charged", "node_build_delta", "node_eval_started",
     "node_evaluated", "node_failed", "node_repaired", "pause", "proxy_scored",
     "repair_critic_verdict", "reward_hack_suspected", "spec_drift", "stage_finished",
-    "stage_rollback", "trust_scan"})
+    "stage_rollback", "trust_scan", "metric_behavior_scan"})
 
 # Values a machine decides — wall clock and the timestamps derived from it. MASKED, never dropped:
 # the key's presence and its position in the payload are part of what is pinned.
-_VOLATILE = frozenset({"eval_seconds", "seconds", "expect_since", "read_at"})
+_VOLATILE = frozenset({"eval_seconds", "seconds", "expect_since", "read_at",
+    "evaluator_return_seconds", "post_evaluator_seconds"})
 
 _GOOD = "import json; print(json.dumps({'metric': 0.1}))\n"
 

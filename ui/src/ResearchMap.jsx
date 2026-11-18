@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { get, runApiPath } from './api.js'
+import { fmtDate } from './format.js'
 import { uiText, uiMessage, useUILanguage, effectiveUILanguage } from './uiLanguage.js'
 import ResearchComparison from './ResearchComparison.jsx'
 import ResearchMemoDraft from './ResearchMemoDraft.jsx'
@@ -8,13 +9,16 @@ import ProjectMetricProfileEditor from './ProjectMetricProfileEditor.jsx'
 import { downloadBlob } from './accessibility.jsx'
 import ProfileMeasurements from './ProfileMeasurements.jsx'
 import ResearchNotices from './ResearchNotices.jsx'
+import ExternalTelemetry from './ExternalTelemetry.jsx'
 import { CampaignOverview } from './CampaignOverview.jsx'
+import { initialMapPage, mapHasMore, nextMapPage, previousMapPage, sectionMapPage } from './researchMapPaging.js'
 
 // This is a read-only projection. It cannot schedule an experiment or grant permission.
 export default function ResearchMap({ runId, generation, onPickNode, onOpenConcepts, onOpenCards, onViewReport, readOnly = false }) {
   const [preference] = useUILanguage()
   const language = effectiveUILanguage(preference)
-  const [open, setOpen] = useState(false), [offset, setOffset] = useState(0)
+  const [open, setOpen] = useState(false), [paging, setPaging] = useState(initialMapPage)
+  useEffect(() => setPaging(initialMapPage()), [runId, generation])
   const [page, setPage] = useState(null), [error, setError] = useState(false)
   const [briefing, setBriefing] = useState(null)
   useEffect(() => {
@@ -22,11 +26,14 @@ export default function ResearchMap({ runId, generation, onPickNode, onOpenConce
     let live = true
     const controller = new AbortController()
     setPage(null); setError(false)
-    get(`${runApiPath(runId, '/research-map')}?expected_generation=${generation}&offset=${offset}&limit=20`,
+    const query = new URLSearchParams({ expected_generation: generation, offset: paging.offset, limit: 20 })
+    if (paging.cursors) query.set('cursors', JSON.stringify(paging.cursors))
+    for (const name of paging.collections || []) query.append('collections', name)
+    get(`${runApiPath(runId, '/research-map')}?${query}`,
       { signal: controller.signal, cache: 'no-store' })
       .then(data => { if (live) setPage(data) }).catch(() => { if (live) setError(true) })
     return () => { live = false; controller.abort() }
-  }, [open, runId, generation, offset])
+  }, [open, runId, generation, paging])
   useEffect(() => {
     if (!open || !runId || !/^[a-f0-9]{64}$/.test(generation || '')) return undefined
     let live = true
@@ -73,6 +80,7 @@ export default function ResearchMap({ runId, generation, onPickNode, onOpenConce
         {!readOnly && briefing.metric_profile?.project_id && briefing.metric_profile?.digest && <ProjectMetricProfileEditor
           key={`${briefing.metric_profile.project_id}:${briefing.metric_profile.digest}`} context={briefing.metric_profile}
           onSaved={result => setBriefing(current => ({ ...current, metric_profile: { ...current.metric_profile, state: 'configured', ...result } }))} />}
+        <ExternalTelemetry runId={runId} generation={generation} summary={briefing.external_telemetry} />
         {briefing.mirror && <p role="status">{uiText('Mirror status')}: {briefing.mirror.state} · {uiText('Last successful pass age (seconds)')}: {briefing.mirror.last_successful_pass_age_seconds == null ? uiText('unknown') : Math.round(briefing.mirror.last_successful_pass_age_seconds)} · {uiText('Supervisor restarts')}: {briefing.mirror.supervisor_restarts ?? uiText('unknown')}</p>}
         {(briefing.operator_directions?.items || []).map((item, index) => <p key={index}>{item}</p>)}
         {(briefing.readiness?.plans || []).map((plan, index) => <p key={`plan-${index}`}>{uiText('Prepared dependency')}: {plan.experiment_id} / {plan.subject_arm} · {plan.producer_run_id} / #{plan.producer_node_id} · {uiText(({ binding_current: 'Binding current', binding_stale: 'Binding stale', awaiting_producer_or_binding: 'Awaiting producer or binding', external_producer_unverified: 'External producer not verified' })[plan.state] || plan.state)} · {uiText('Supported action')}: <code>{plan.next_action.replace('{run_id}', encodeURIComponent(runId))}</code></p>)}
@@ -81,9 +89,25 @@ export default function ResearchMap({ runId, generation, onPickNode, onOpenConce
         </p>)}
         {!briefing.observation?.same_event_prefix && <p role="status">{uiText('Sources changed during this read. Refresh before acting.')}</p>}
       </section>}
-      {error && <p role="status">{uiText('Research map is unavailable. Refresh the run before acting.')}</p>}
+      {error && <><p role="status">{uiText('Research map is unavailable. Refresh the run before acting.')}</p>
+        <button type="button" onClick={() => setPaging(initialMapPage())}>{uiText('Refresh')}</button></>}
       {!page && !error && <p>{uiText('Loading…')}</p>}
       {page && <>
+        {page.response_budget?.shortened_items > 0 && <p role="status">{uiText('Some record details are shortened. Inspect their original sources.')}</p>}
+        {(page.response_budget?.limited || page.response_budget?.omitted_sections?.length > 0) && <section>
+          <p role="status">{uiText('Some information is on following pages or separate sections.')}</p>
+          {(page.response_budget?.omitted_sections || []).map(name => {
+            const label = { goal: 'Campaign goal', operator_directions: 'Standing directions',
+              quality: 'Research coverage', campaign_overview: 'Campaign overview' }[name]
+            return label && <button type="button" key={name}
+              disabled={paging.collections?.length === 1 && paging.collections[0] === name}
+              onClick={() => setPaging(current => sectionMapPage(current, name))}>
+              {uiMessage('Read section: {0}', [uiText(label)])}</button>
+          })}
+        </section>}
+        {paging.collections?.includes('operator_directions') && page.operator_directions && <section>
+          <h3>{uiText('Standing directions')}</h3><ul>{(page.operator_directions.items || []).map((text, i) => <li key={i}>{text}</li>)}</ul>
+        </section>}
         {page.goal && <section><h3>{uiText('Campaign goal')}</h3><p>{page.goal}</p></section>}
         {!page.source_health?.protocol?.read_complete && <p role="status">{uiText('Protocol history is incomplete; missing entries are unknown.')}</p>}
         {page.quality && <section>
@@ -95,8 +119,13 @@ export default function ResearchMap({ runId, generation, onPickNode, onOpenConce
             [page.quality.memos_with_sources, page.quality.memo_count, page.quality.structured_claims, page.quality.claim_source_links])}</p>
           <p>{uiText('Counts do not verify claims. Technical operations may not need a separate question or literature review.')}</p>
           <p>{uiMessage('Without linked question: {0} of {1} applicable or unclassified nodes; {2} explicitly technical nodes excluded, {3} unclassified.', [page.quality.question_applicable_or_unknown_without_card, page.quality.question_applicable_or_unknown_nodes, page.quality.engineering_nodes_excluded, page.quality.unclassified_nodes])}</p>
-          <p>{uiText('Intake notice resolution is unknown; inspect the original command receipt.')}</p>
+          <p>{page.quality.notice_dispositions?.counts
+            ? <>{uiText('Saved notice dispositions')}: {JSON.stringify(page.quality.notice_dispositions.counts)} · {uiText('Author assertions, not proof of correction; historical warnings may remain unknown.')}</>
+            : uiText('Notice dispositions were not inspected or are incomplete; resolution is unknown.')}</p>
           <ResearchNotices runId={runId} generation={generation} />
+          {Object.entries(page.quality.research_link_actions || {}).map(([key, action]) => <p key={key}>{action}</p>)}
+          {page.quality.report_metric_status && <p>{uiText('Report metric references')}: {uiText(page.quality.report_metric_status.status)} · {page.quality.report_metric_status.meaning}</p>}
+          {page.quality.report_repetition?.status === 'substantial_verbatim_overlap' && <p>{uiText('The overview and local result contain substantial verbatim overlap. Review the writing; do not remove evidence automatically.')}</p>}
           {!!page.quality.report_fields_empty?.length && <p>{uiText('Unfilled report sections')}: {page.quality.report_fields_empty.join(', ')}</p>}
         </section>}
         <CampaignOverview overview={page.campaign_overview} visibleNodeCount={page.nodes.total}
@@ -204,18 +233,25 @@ export default function ResearchMap({ runId, generation, onPickNode, onOpenConce
             {node.hypothesis && <p>{uiText('Hypothesis')}: {node.hypothesis}</p>}
             {node.rationale && <p>{uiText('Rationale')}: {node.rationale}</p>}
             {node.status && <p>{uiText('Recorded status')}: {uiText(node.status)}{Number.isInteger(node.attempt) && <> · {uiMessage('Attempt {0}', [node.attempt])}</>}</p>}
+            <p>{uiText('Node type')}: {node.kind === 'artifact' ? uiText('Artifact preparation; not ranked') : uiText('Scientific candidate')}
+              {' · '}{uiText('Job role')}: {node.job_role || uiText('not recorded')}
+              {' · '}{uiText('Primary scalar')}: {node.metric_present ? uiText('recorded') : node.kind === 'artifact' ? uiText('not expected for an artifact job') : uiText('not recorded')}</p>
+            <p>{uiText('Lifecycle creation')}: {fmtDate(node.created_at)}{' · '}{uiText('Evaluation start')}: {fmtDate(node.eval_started_at)}{' · '}{uiText('Terminal recorded')}: {fmtDate(node.completed_at)}</p>
             {!!node.declared_work_kinds?.length && <p>{uiText('Declared work type')}: {node.declared_work_kinds.map(kind => uiText(({ scientific_experiment: 'Scientific experiment', fit: 'Training', score_only: 'Scoring only', engineering_recovery: 'Technical recovery' })[kind] || kind)).join(', ')}</p>}
             {!!node.extra_metric_keys?.length && <p>{uiText('Recorded metric keys')}: {node.extra_metric_keys.join(', ')}</p>}
             {!!node.parent_ids?.length && <p>{uiText('Recorded node parents')}: {node.parent_ids.map(n => `#${n}`).join(', ')} · {uiText('Parent links do not by themselves identify a scientific control.')}</p>}
+            {!!node.uses?.length && <p>{uiText('Artifact dependencies')}: {node.uses.map(n => `#${n}`).join(', ')} · {uiText('A dependency is not proof of scientific parentage.')}</p>}
             {!!node.questions?.length && <ul>{node.questions.map((q, i) => <li key={i}>{q}</li>)}</ul>}
             <p>{uiText('Concepts')}: {(node.concepts || []).join(', ') || uiText('not recorded')}</p>
             {node.detail_truncated && <p>{uiText('Details shortened; inspect the original experiment card.')}</p>}
           </article>)}
         </section>
         <h3>{uiText('Report history')}</h3>
-        <ul>{page.reports.items.map(report => <li key={report.seq}>#{report.seq} · {report.headline}</li>)}</ul>
-        <button type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}>{uiText('Previous')}</button>{' '}
-        <button type="button" disabled={!page.experiments.has_more && !page.cards?.has_more && !page.uploads?.has_more && !page.nodes.has_more && !page.research_memos?.has_more && !page.decisions?.has_more && !page.reviews?.has_more} onClick={() => setOffset(offset + 20)}>{uiText('Next')}</button>
+        <ul>{page.reports.items.map(report => <li key={report.seq}>#{report.seq} · {fmtDate(report.ts)} · {report.headline}</li>)}</ul>
+        <button type="button" disabled={!paging.history.length} onClick={() => setPaging(previousMapPage)}>{uiText('Previous')}</button>{' '}
+        <button type="button" disabled={!mapHasMore(page)} onClick={() => {
+          try { setPaging(nextMapPage(paging, page)) } catch { setError(true); setPage(null) }
+        }}>{uiText('Next')}</button>
         <p>{uiMessage('{0} experiments', [page.experiments.total])}</p>
       </>}
     </>}

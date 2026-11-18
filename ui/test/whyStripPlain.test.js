@@ -99,3 +99,17 @@ test('the all-withheld Concepts badge no longer says "Membership withheld … no
   assert.doesNotMatch(source, /Membership withheld for all/)
   assert.match(source, /the run is tagged/)
 })
+
+
+test('card-budget plans use the observed eligible count rather than high physical ids', () => {
+  const nodes = { 0: {id: 0}, 4: {id: 4}, 17: {id: 17} }
+  const plan = { node_count_basis: 'card_budget', max_nodes: 8, endgame_start: 6, current_node_count: 3 }
+  assert.deepEqual(planStanding({ nodes, plan }), { inEndgame: false, budgetSpent: false })
+  assert.deepEqual(planStanding({ nodes, plan: {...plan, current_node_count: 6} }),
+    { inEndgame: true, budgetSpent: false })
+  assert.deepEqual(planStanding({ nodes, plan: {...plan, current_node_count: 8} }),
+    { inEndgame: true, budgetSpent: true })
+  for (const count of [undefined, true, '8', -1])
+    assert.deepEqual(planStanding({ nodes, plan: {...plan, current_node_count: count} }),
+      { inEndgame: false, budgetSpent: false })
+})

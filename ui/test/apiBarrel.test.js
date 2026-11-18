@@ -32,7 +32,7 @@ const EXTRACTED = ['apiClient.js', 'commandModel.js', 'commandStorage.js', 'comm
                    // The three UI-02's resolution declined, extracted 2026-09-08: the CONTROL action
                    // vocabulary, the paid concept-lens family (the ninth concern the finding never
                    // named) and the cross-run ledger reads with their sanitizers.
-                   'controlActions.js', 'conceptLensApi.js', 'crossRunLedger.js']
+                   'controlActions.js', 'conceptLensApi.js', 'crossRunLedger.js', 'reportReviewApi.js']
 const NARROW_FACADES = ['reviewRouteApi.js']
 
 const readDirSource = async base => {

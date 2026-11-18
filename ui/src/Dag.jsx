@@ -8,6 +8,7 @@ import { fmt, layoutWithGroups, nodeClass, workingNodeIds, operatorMeta, OPERATO
   isSweep, sweepInfo, chipFontSize, storageGet, storageSet, nodeActivityView, nodeActivityStatus,
   NODE_ACTIVITY } from './util.js'
 import { stripMd } from './markdown.jsx'
+import { fmtDate } from './format.js'
 import { nodeChip } from './report.js'
 import { forkChip } from './forkProvenance.js'
 import { seedContractText, seedSource } from './seedProvenance.js'
@@ -318,11 +319,17 @@ function ExpNode({ data }) {
   const branch = forkChip(node)
   const seed = seedSource(node.origin)
   const cardTitle = op.label + (node.idea?.rationale ? ' — ' + stripMd(node.idea.rationale) : '')
+    + ` · ${uiText('Lifecycle created')}: ${fmtDate(node.created_at)}`
+    + ` · ${uiText('Evaluation start')}: ${fmtDate(node.eval_started_at)}`
+    + ` · ${uiText('Terminal recorded')}: ${fmtDate(node.completed_at)}`
     + (activityVisible ? ` · ${activity.label}` : '')
     + (conceptTruth ? ` · ${conceptTruth}` : '')
     + (branch ? ` · ${branch.title}` : '')
   const selectionLabel = [
     ['Experiment #{0}', [node.id]], op.label, activity.label,
+    ['Lifecycle created {0}', [fmtDate(node.created_at)]],
+    ['Evaluation start {0}', [fmtDate(node.eval_started_at)]],
+    ['Terminal recorded {0}', [fmtDate(node.completed_at)]],
     m == null ? 'metric unavailable' : ['metric {0}', [fmt(m)]],
     m == null ? null : dagObjectiveSourceLabel(node),
     dagFeasibilityLabel(node.feasible),
@@ -688,17 +695,20 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     // deep tree. Plus the champion's ancestor chain → a persistent faint-gold "winning spine" that
     // shows the root→best path even with nothing selected. Pure graph walks over parent_ids/children.
     const children = {}
-    Object.values(ns).forEach(n => (n.parent_ids || []).forEach(p => { (children[p] ||= []).push(n.id) }))
+    Object.values(ns).forEach(n => [...(n.parent_ids || []), ...(n.uses || [])].forEach(p => {
+      (children[p] ||= []).push(n.id)
+    }))
     const reach = (start, nextOf) => {
       const seen = new Set(); const stack = [start]
       while (stack.length) { const x = stack.pop(); (nextOf(x) || []).forEach(y => { if (!seen.has(y)) { seen.add(y); stack.push(y) } }) }
       return seen
     }
+    const artifactParents = node => [...(node?.parent_ids || []), ...(node?.uses || [])]
     const focusSet = (selectedId != null && ns[selectedId])
-      ? new Set([selectedId, ...reach(selectedId, x => ns[x]?.parent_ids), ...reach(selectedId, x => children[x])])
+      ? new Set([selectedId, ...reach(selectedId, artifactParents), ...reach(selectedId, x => children[x])])
       : null
     const champSet = (state.best_node_id != null && ns[state.best_node_id])
-      ? new Set([state.best_node_id, ...reach(state.best_node_id, x => ns[x]?.parent_ids)])
+      ? new Set([state.best_node_id, ...reach(state.best_node_id, artifactParents)])
       : null
 
     const rfNodes = []
@@ -786,6 +796,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       const onLineage = focusSet && focusSet.has(e.srcId) && focusSet.has(e.dstId)   // selected node's path
       const onChamp = champSet && champSet.has(e.srcId) && champSet.has(e.dstId)      // root→best spine
       const cls = []
+      if (e.relation === 'uses') cls.push('uses')
       if (isDebug) cls.push('debug')
       if (isLeader) cls.push('leader')
       if (onLineage) cls.push('lineage')                 // accent: the path through the selected node

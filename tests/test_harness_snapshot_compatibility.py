@@ -63,7 +63,7 @@ def test_diagnostic_config_stays_readable_but_typed_bootstrap_cannot_approve_unk
             progress = api.run_progress("demo", generation)
             assert progress["status"] == 503 and progress["body"]["detail"]["code"] == "harness_config_incompatible"
             connection = api.connection_check("demo", generation)
-            assert connection["ok"] is False and connection["at"] == "handoff", connection
+            assert connection["ok"] is False and connection["at"] == "identity", connection
             assert store.path.read_bytes() == before and json.loads(path.read_bytes()) == data
             # Operator restoration of the supported snapshot requires a new read.
             # The read itself grants no start/resume/training and rewrites nothing.

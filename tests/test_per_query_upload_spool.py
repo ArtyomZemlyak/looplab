@@ -33,7 +33,8 @@ def test_a_lost_upload_is_resumed_without_the_file(tmp_path, monkeypatch):
     state = {"down": True}
 
     def flaky(request):
-        if state["down"]:
+        # Metadata preflight succeeds; the actual binary POST reply is what is lost.
+        if state["down"] and request.url.path.endswith("/per-query"):
             raise httpx.ConnectError("connection reset", request=request)
         return forward(request)
 

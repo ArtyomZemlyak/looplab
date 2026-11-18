@@ -62,6 +62,134 @@ negative results, and use the operator's requested language and readable scienti
 7. Curate evidence-backed claims and local lessons; explain a no-action decision separately for claims, concepts, lessons and skills. Shared KB changes require their own authorization.
 8. Update a cumulative report covering major directions and limitations, plus the latest experiment result and references to historical versions. Proposals not tested belong in next directions. Choose the next step only from current evidence and operator priorities.
 
+## Node semantics, stages and evidence links
+
+One scientific candidate normally owns its fit and protected score as stages of the same node. Do not create a second node just to move a checkpoint into its scorer. A separate score-only job is justified by a genuinely different scorer/policy or an existing producer; declare its `model_producer`, attempt, metric and comparison. This is an execution-semantic distinction, not a requirement to manufacture a primary scalar.
+
+Declare `job_role` as prepare/profile/fit/score/recovery independently of `node_kind`. `artifact` is unranked preparation or artifact production; completing it without a primary scalar is not a failed model evaluation. Do not mark a scientific fit as artifact merely to conceal missing ranking evidence. The operator's primary reader defines the ranking objective; genuine secondary measurements belong in `eval.metrics` with real readers. Missing values are unavailable, never zero. Inspect secondary-output provenance before comparing them.
+
+These relationships answer different questions and are not interchangeable:
+
+- `question_card_id` links an experiment registration to a scientific direction; `parent_card_id` links its candidate to that direction. Create or select the card explicitly, without retroactively rewriting an old preregistration.
+- `parent_id`/`parent_ids` describes scientific code lineage and every merged parent. `uses` only declares artifact inputs; the UI draws it dashed because it does not establish scientific parentage or a control.
+- `model_producer`, `scientific_control` and `code_reference` describe the registered comparison. Declare meaningful experiment titles and stable concepts rather than relying on `Experiment #N` or an operator label.
+
+Technical recovery inherits the existing context and can explain why a new scientific question or literature review is not applicable. Do not convert every preparation or retry into a detached scientific experiment. Fill supported links at submission; UI guidance is advisory and creates no execution gate.
+
+## External deep research
+
+External mode does not run the internal Researcher/Deep-Research role: the connected agent performs research and publishes `research_completed` itself, even when `backend=toy`. `deep_research_every` controls the external memo obligation (`0` means the opening memo and every due window, negative disables it), not a hidden internal writer. Use the `looplab-deep-research` skill or this equivalent protocol:
+
+1. Read the actual task, target/cohort, scorer, feature-availability time, existing attempts and fresh operator directions. State the decision-relevant question before searching.
+2. Read primary papers/documentation/code rather than forwarded summaries. Record actual URLs and extract setup, baseline, metric denominator, result, ablations and limitations. Separate author claims, measured run evidence and your inference.
+3. Compare each source with this run's protocol; never transfer absolute scores across incompatible data, target or policies. Resolve or preserve contradictions explicitly.
+4. Publish a memo with a supported `summary`, `reasoning`, `open_questions`, `sources`, and `claims` linked to URLs and/or terminal node IDs. Each important claim needs its own evidence and limitation. Operational status is not a scientific memo; technical retries need no fabricated literature.
+5. Propose the smallest discriminating experiment: control, one meaningful change, genuine metric/test and outcomes that would change the decision. Link it to the direction and execute only under current authority.
+
+Write all new prose, including next actions and experiment labels, in `research_briefing.authoring_language`. Explicit run language wins over project preference; auto/auto is conservatively inferred from the goal. Preserve source titles, IDs, code and numeric evidence; old records are not silently translated.
+
+## Authored work recovery
+
+Before compaction or a handoff, publish a bounded `agent_checkpointed` command with
+`data.external_work_state`: goal, last_completed, next_step, optional blocker {owner,summary}, declared
+harness_revision, unfinished_artifacts [{path,sha256,status}], work_claims, saved_command_id and
+saved_action_ref. This is a short factual work note, never a transcript or private reasoning. Read it
+through `run_progress.external_work_state` or briefing after reconnect. Keep the actual private saved
+commands/actions; the note does not replace their original payloads or native receipts.
+
+Follow its concrete `next_read` before choosing work. It observes a pure command receipt or fresh
+progress and never retries automatically. Context changes withhold the old next-step suggestion.
+Artifact identities, client tool installation, harness version and work claims remain unverified
+unless checked separately. Resolve surviving artifact aliases against their pinned identity; do not
+rebuild or repeat completed fits/scores from an old notification. This optional note adds no admission
+gate or Root approval requirement, and never replaces actual source/protocol/budget/attempt fences.
+
+## Optional explicit premise review
+
+A research filing (`parent_card_id`) is not a logical dependency, and `tested` is not refutation.
+If an explanation actually relies on another Card's claim, optionally submit `claim_reviewed` through
+the existing generation/idempotency-bound command endpoint (MCP `api_request`). Supply exactly:
+
+```json
+{"id":"card-2","premise_ids":["card-1"],"assessment":null}
+```
+
+This explicitly replaces the whole declaration. Up to four exact same-run Card IDs can be logical
+premises; empty `premise_ids` withdraws edges. To record an authored assessment of the subject, use
+`assessment={"judgment":"refuted","reason":"...","node_ids":[0]}` or `inconclusive`; null withdraws
+it. Evidence must be this exact Card's own usable native measured nodes, at most 16, never a failed
+attempt, substituted/aborted/trust-excluded evidence or an unrelated child's result. Reasons are at
+most 512 characters; review payloads at most 16KiB. The server stamps immutable subject seeds and exact
+current native evidence/attempt/source/protocol/objective receipts, refuses cycles and rechecks
+before the strict-tail append. It does not validate the author's scientific conclusion.
+
+Read the Card's bounded `premise_review` and projection receipt. A current explicit premise with an
+authored refutation adds an `undercut` explanation notice to its direct dependent and Researcher
+context. It does not change any child's measured result/verdict, infer refutation from no gain,
+propagate through research filings, or make an undercut child itself refuted. Reset or changed
+native evidence makes the assessment stale; malformed latest reviews are unavailable, never old
+truth resurrected. `premise_status` distinguishes current, unreviewed, stale and unavailable. The
+UI shows the same interpretation without a new approval button. Existing source/protocol/GPU gates
+remain; this optional review starts no model/engine, blocks no ML work and requires no Root ACK.
+
+## Optional work intents and direction receipts
+
+To make parallel preparation visible, optionally add `work_intents` to `external_work_state`, or
+publish only `data={"work_intents":[...]}` through the existing `agent_checkpointed` command. The
+standalone form is common metadata on internal and external runs, subject to existing credentials.
+It starts no engine or model. Each of at most eight intents declares `id`, `topic`, `operation`
+(`prepare|profile|fit|score|analysis|report|other`), a lowercase SHA-256 `subject_sha256`, `status`
+(`active|completed|cancelled`), a short `summary`, and optional `direction_refs`. Hash an explicitly
+specified input/experiment descriptor; the server does not verify that it identifies materialized
+inputs. This declaration is neither an exclusive claim nor measured completion. The whole list is
+at most 8 KiB. An explicit empty list withdraws declarations; unrelated checkpoints preserve them.
+
+Read `work_claims(run_id, expected_generation, peers=[...])` or
+`GET /api/runs/{run_id}/work-claims?expected_generation=...&peer=...`. Select at most eight peer IDs
+already known from sibling discovery; this route performs no workspace-wide scan. Only matching
+native task IDs are shown, which does not establish matching data or scientific equivalence. Exact
+active subject/operation matches are **possible overlaps**, never duplicate execution evidence.
+Each run has its own observed native prefix; the collection is not an atomic distributed snapshot.
+A damaged complete record or unsupported latest declaration yields unavailable claims, never an
+empty-work assertion. A normal unfinished final event append keeps EventStore's readable-prefix
+semantics. The response is bounded to 4–64 KiB and omits whole peer rows with `omitted_peers` for an
+explicit narrower/larger read; it never shortens a scientific declaration. `full_ref` addresses the
+original generation-bound checkpoint through the existing bounded log pager. The MCP reader refuses
+malformed critical metadata without a usable body and never pages or retries automatically.
+
+Use `run_progress.work_intents` for this run's latest declaration and current-context change notice.
+A direction reference binds the exact native hint `event_seq` and stripped UTF-8 `text_sha256`, with
+an authored `acknowledged|following|deferred|conflict` disposition and short explanation. Historical
+operator references remain historical; model research hints and unknown/different text are refused.
+New current directions not cited by an active declaration are explicitly unaddressed in the visible
+window. Explain a differing scientific intent honestly instead of claiming that a queue receipt
+proves the executor read it. These observations never stop healthy work or require a Root response.
+
+The same optional read separately shows retained native outbox/ACK receipts for current directions.
+The existing `acknowledge_agent_event` / `agent-event-ack` is the only ACK writer; event IDs are strict
+integers over HTTP and MCP. Transport/queue acceptance, missing ACK, and explicit self-attested ACK
+are distinct from recipient comprehension, agreement and scientific completion. Unreadable or
+unsupported receipt sources are unavailable. No work-claims or ACK field is an admission, GPU,
+checkpoint, notification-delivery or Root approval gate; actual protocol and source guards remain
+in force. Production adoption and cross-machine coordination effectiveness are unmeasured.
+
+## Current directions and delayed notifications
+
+Read `run_progress.operator_directions` before acting. Scoped IDs/topics in its active records have
+explicit completion/cancellation and supersession; retired IDs in the receipt are history. An old
+handoff, delivery timestamp or replay of an accepted command never renews retired work. To correct a
+scoped direction use a new ID with exact current same-topic `supersedes` through the existing `hint`
+command. Preserve independent topics; do not infer completion from ACK or process activity. These
+records supply context and never replace current protocol, source, budget or attempt checks.
+
+## Reports and research memory
+
+The cumulative overview answers what the campaign has established and what to do next. The local body describes the latest result; do not repeat the same paragraphs in both. A cadence due is not by itself a reason for a near-identical version. Read `report_context.report_repetition` as advisory feedback, preserve meaningful evidence links, and publish only material updates.
+
+`report_metric_status` is `bound` only for actual metric+node references, `explained_unavailable` when the saved report explicitly states why references are unavailable, and `missing` otherwise. It never invents a scalar or treats explained N/A as a failure. Inspect actual metric bindings and per-query comparisons before interpreting any value.
+
+Run-local memos and `local_lessons` stay in the event journal. They are not shared cross-run memory. Record supported local lessons during work; at configured knowledge reviews and finalization publish shared lessons/skill candidates or an explicit no-action reason through the native phases. Inspect the configured store and receipts. An empty shared store does not prove that no research occurred, and must not be filled with invented or duplicated lessons.
+
 ## Examples
 
 A useful research memo: “Does a wider decoder recover more unseen items on the same weights and query cohort? Prior beam evaluation measured X on this test; the cited decoder paper uses a different candidate space. A fixed-width paired comparison tests search depth, not training quality. The effect may be negative; the next registered comparison uses the existing checkpoint and declares its metric and correction.” The paper and the prior result should be actual references, and X must be an actual observation.
@@ -338,3 +466,30 @@ seed. Следующий вопрос: сохраняется ли эффект 
 даже старое уведомление сначала сверяйте с текущими `run_progress` и receipt, а не выполняйте его
 как актуальную команду. `delivered` и наблюдаемая активность сами по себе не доказывают чтение
 конкретного сообщения.
+
+
+Independent external usage may be recorded, without a launch gate, through the saved native
+`agent_checkpointed` command with `data.external_telemetry` instead of work notes. Include exact
+node/attempt and revision fingerprints; keep missing counters null and use stable delta source IDs.
+Use `core.external_telemetry.provider_observation` at a provider-response boundary to extract only
+usage metadata. A supplied provider receipt is client-observed, not independently attested billing;
+ordinary agent summaries remain declared. `/external-telemetry` pages original receipts; preserve its
+prefix digest. Native `cli_agent` spend remains in its existing ledger, never submitted again here.
+
+
+## Score-vector owner and checkpoint producer
+
+An experiment arm's `node_id` is the node that actually produces its measured score vectors. A
+separate fit/checkpoint node belongs in `relationships` as `model_producer`. A combined fit+score
+node can own both. When a future score node is not yet known, omit the arm owner and let the first
+genuine arm upload bind it; do not fill in a fit ID as a placeholder for another node's vectors.
+For example, an existing checkpoint from node10 scored by node11 is declared with
+`arms.control.node_id=11` and a `model_producer` relationship for subject_arm control, node10.
+
+`arm_bound_elsewhere` keeps this identity strict. Its response distinguishes registered ownership
+from a prior accepted upload and names the recorded and submitted node IDs. If the registration
+used the wrong owner, read the original, then use an explicit new `experiment_id`, `supersedes` and
+reason through the existing experiment amendment. Reuse the genuine saved score vectors under their
+actual node/attempt; preserve the original declaration, producer lineage and accepted receipts.
+This is a metadata correction, not a request for another fit or score. A changed declaration uses
+a new action ID; an exact lost-response retry preserves its original body/action ID.

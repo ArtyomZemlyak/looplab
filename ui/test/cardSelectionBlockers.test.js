@@ -15,7 +15,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { CARD_COLUMNS, WITHHELD_LABEL, cardSelectionBlock } from '../src/cardBoardModel.js'
+import { CARD_COLUMNS, WITHHELD_LABEL, cardSelectionBlock, cardSelectionExplanation } from '../src/cardBoardModel.js'
 
 const card = (extra = {}) => ({ id: 'card-0', selection_ready: false, ...extra })
 
@@ -46,6 +46,15 @@ test('a ledger fault still looks like one', () => {
     assert.equal(result.tone, 'fault', blocker)
     assert.equal(result.label, label)
   }
+})
+
+test('raw blocker ids come with a human explanation and no false applied/failed verdict', () => {
+  const incomplete = cardSelectionBlock(card({ selection_blockers: ['action_receipt_incomplete'] }))
+  assert.match(incomplete.title, /current owner cannot be established/)
+  assert.match(incomplete.title, /not proof that the action was applied/)
+  const terminal = cardSelectionBlock(card({ selection_blockers: ['work_terminal'] }))
+  assert.match(terminal.title, /This is not an error/)
+  assert.match(cardSelectionExplanation(['some_future_blocker']), /Unrecognised blocker/)
 })
 
 test('a fault wins over a lifecycle reason on the same card', () => {

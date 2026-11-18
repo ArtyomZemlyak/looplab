@@ -2,7 +2,7 @@
 // protocols built on top of them. Originally split out of util.js (mega-refactor P5.2 — bodies
 // verbatim); util.js re-exports everything, so importers are unchanged.
 //
-// It is now also a BARREL. Nine concerns that had re-accreted here moved into their own modules
+// It is now also a BARREL. Ten concerns that had re-accreted here moved into their own modules
 // (doc 25 UI-02 — bodies verbatim again) and are re-exported below, so no importer of api.js or
 // util.js changed:
 //
@@ -15,6 +15,7 @@
 //   controlActions.js     CONTROL — the operator action vocabulary over that command lifecycle
 //   conceptLensApi.js     the paid concept-lens submit / abandon / lost-tab recovery family
 //   crossRunLedger.js     the cross-run claim-ledger reads and their payload sanitizers
+//   reportReviewApi.js    the report-review read/intent/paid-command protocol
 //
 // The last three are what UI-02's resolution declined, plus the ninth concern the finding never
 // named; each of their headers records why it was declined then and what changed. All three are
@@ -959,3 +960,8 @@ export const attentionFeed = (limit = 200, cursor = null, options = {}) => get(
   + (cursor == null ? '' : `&cursor=${encodeURIComponent(cursor)}`),
   options,
 )
+
+export {
+  loadReportReviewIntent, saveReportReviewIntent, clearReportReviewIntent, getReportReview,
+  validateReportReviewResult, submitReportReview,
+} from './reportReviewApi.js'

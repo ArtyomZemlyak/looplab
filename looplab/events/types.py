@@ -221,6 +221,7 @@ EV_REWARD_HACK_SUSPECTED = "reward_hack_suspected"
 # retry, not a Developer call. `trust_scan` was inside 52 of the 56 windows the old one discarded.)
 # The reader-side default lives in `trust/scan_receipt.py` and is the load-bearing half: a node with
 # no receipt reads `unknown`, NEVER `clean` — which is the inversion this event exists to prevent.
+EV_METRIC_BEHAVIOR_SCAN = "metric_behavior_scan"  # folded advisory projection; no score or launch authority
 EV_TRUST_SCAN = "trust_scan"
 EV_NOVELTY_REJECTED = "novelty_rejected"
 # PART IV D3 (§21.4, Phase 2b): the LIVE novelty gate GRADED a proposal over the concept graph and
@@ -338,6 +339,7 @@ EV_APPROVAL_GRANTED = "approval_granted"
 EV_SPEC_APPROVED = "spec_approved"
 EV_HYPOTHESIS_ADDED = "hypothesis_added"       # also engine-written after deep research
 EV_HYPOTHESIS_UPDATED = "hypothesis_updated"
+EV_CLAIM_REVIEWED = "claim_reviewed"  # explicit logical premises and authored evidence interpretation
 EV_HYPOTHESIS_MERGED = "hypothesis_merged"     # engine-written: fold alias hypotheses into a canonical
 EV_HYPOTHESIS_MERGE_REVIEWED = "hypothesis_merge_reviewed"  # external board review; diagnostic
 # Durable Card ledger — a work-item projection beside the thin hypothesis-direction board. It never
@@ -455,6 +457,9 @@ EV_COMMAND_ACK = "command_ack"                  # engine folded a server command
 EV_FINALIZE_STEP = "finalize_step"              # one logical finalize's replay-safe step gate
 EV_REPORT_REFRESH_STARTED = "report_refresh_started"  # durable paid-work/idempotency claim
 EV_REPORT_REFRESH_FAILED = "report_refresh_failed"    # sanitized terminal receipt; no report written
+EV_REPORT_REVIEW_STARTED = "report_review_started"    # optional paid independent-context review claim
+EV_REPORT_REVIEW_COMPLETED = "report_review_completed"  # advisory review; never folded authority
+EV_REPORT_REVIEW_FAILED = "report_review_failed"      # sanitized paid-review terminal
 EV_CONCEPT_LENS_STARTED = "concept_lens_started"      # durable paid projection/idempotency claim
 EV_CONCEPT_LENS_COMPLETED = "concept_lens_completed"  # validated spec or authoritative decline
 EV_CONCEPT_LENS_FAILED = "concept_lens_failed"        # retry-safe pre-provider terminal failure
@@ -1012,8 +1017,8 @@ EV_TRACK_DONE = "track_done"
 # DIAGNOSTIC for `eval_canary_*`'s reason: appended from the eval child, per attempt. The fold never
 # reads it; the charge reaches the run through the lifecycle's one terminal.
 EV_EVAL_ATTEMPT_WITHHELD = "eval_attempt_withheld"
-EVAL_WITHHELD_POINTS = ("admit", "before_launch", "after_canary", "decide_repair")
-EVAL_WITHHELD_REASONS = ("paused", "stopping", "infra_unavailable")
+EVAL_WITHHELD_POINTS = ("admit", "before_launch", "after_canary", "decide_repair", "executor_reconcile")
+EVAL_WITHHELD_REASONS = ("paused", "stopping", "infra_unavailable", "executor_unknown")
 EV_WORKSPACE_SEEDED = "workspace_seeded"
 # FOLDED (moved out of DIAGNOSTIC_EVENTS): the start of an arbitrary operator `run_setup` command is
 # the only evidence that its side effects may have been applied. Without folding it, a kill between
@@ -1216,7 +1221,7 @@ ALL_EVENT_TYPES: frozenset[str] = frozenset(
 )
 
 
-def standing_hint_dedup_key(data) -> tuple[object, str]:
+def standing_hint_dedup_key(data) -> tuple:
     """Semantic identity for one standing hint without collapsing authority classes.
 
     Deep Research still writes the legacy ``hint`` event for replay compatibility, but its model
@@ -1226,6 +1231,9 @@ def standing_hint_dedup_key(data) -> tuple[object, str]:
     """
     row = data if isinstance(data, dict) else {}
     authority = "deep_research_advisory" if row.get("source") == "deep_research" else "operator"
+    if "directive_id" in row:
+        return (row.get("directive_id"), row.get("topic"), row.get("status", "active"),
+                tuple(row.get("supersedes") or []), row.get("text"), authority)
     return row.get("text"), authority
 
 # Engine invariant #1 states "only the main task appends" — this set is the ONE enforced
@@ -1349,6 +1357,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_WORKSPACE_SEEDED,
     EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_SKILLS_PROMOTED, EV_LESSONS_RECONCILED,
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,
+    EV_REPORT_REVIEW_STARTED, EV_REPORT_REVIEW_COMPLETED, EV_REPORT_REVIEW_FAILED,
     EV_CONCEPT_LENS_STARTED, EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED,
     EV_TRAIN_MONITOR_ALERT,
     EV_HYPOTHESIS_MERGE_REVIEWED,
@@ -1475,7 +1484,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "agent_checkpointed": PayloadContract(
         "An agentic role's mid-loop checkpoint: the turn, the plan it works from, the todo updates it just made.",
         required=("label", "plan", "plan_updates", "todos", "turn"),
-        optional=(),
+        optional=("external_telemetry", "external_work_state", "work_intents"),
     ),
     "agent_decision": PayloadContract(
         "The unified agent's pick of the next action, beside the legal set it was offered.",
@@ -1650,6 +1659,10 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
                   "novelty_verdict", "proposal_ref", "research_origin", "steering_context"),
         # NOT whole (review 2026-09-22, EVT-05): the handler copies the allow-list above into one
         # bounded candidate per field; an unknown key is never kept.
+    ),
+    "claim_reviewed": PayloadContract(
+        "Explicit logical premises and authored assessment bound to native own-evidence receipts; advisory only.",
+        required=("actor_kind", "review"),
     ),
     "card_merged": PayloadContract(
         "Alias Cards folded into a canonical one, with the seq that decided the edge.",
@@ -1875,7 +1888,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # `fault` + `occupant`: the box fault that withheld it, when it was a FULL run directory
         # (`runtime/infra_probe.py::RUN_DIR_FULL`) — read back as "this lifecycle already met one"
         # (`engine/evaluate.py::run_dir_full_met`) — and the largest node workdir measured then.
-        optional=("fault", "occupant"),
+        optional=("executor_receipt", "fault", "occupant"),
     ),
     "artifact_synced": PayloadContract(
         "The operator's eval.artifact_sync command ran over a node's workdir after its terminal.",
@@ -1912,13 +1925,13 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # `implicit` ("sandboxed"): the operator-enabled smoke for a task declaring no canary
         # (doc 78 leftover, 2026-10-14); `inconclusive`: that smoke died on a REFUSED WRITE, so it
         # passed without a verdict and the full eval decided.
-        optional=("error", "exit_code", "failed_stage", "implicit", "inconclusive", "log_dir",
+        optional=("equivalence_digest", "error", "exit_code", "failed_stage", "implicit", "inconclusive", "log_dir",
                   "near_cap", "retry", "timed_out"),
     ),
     "eval_canary_started": PayloadContract(
         "An eval canary is about to run the node's stage chain on the task's tiny slice.",
         required=("attempt", "code_digest", "generation", "node_id", "timeout"),
-        optional=("implicit", "retry"),
+        optional=("equivalence_digest", "implicit", "retry"),
     ),
     "eval_invocation_claimed": PayloadContract(
         "One paid evaluation attempt is about to invoke the evaluator, under a reconciliable id.",
@@ -1927,7 +1940,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # re-invokes an evaluator whose previous invocation of the SAME id never settled.
         # `canary_ran` is written on every claim since crit_v57 (true or false; absent = an older
         # claim): whether THIS attempt ran an eval canary of its own, which its settle carries.
-        optional=("after_interrupted_attempt", "canary_ran"),
+        optional=("after_interrupted_attempt", "canary_ran", "executor_contract"),
     ),
     "eval_invocation_recovered": PayloadContract(
         "An ok-settled invocation with no terminal, on resume: finalized from its evidence, or re-run "
@@ -1940,7 +1953,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("attempt", "eval_seconds", "generation", "invocation_id", "node_id", "outcome"),
         # `result` rides an `ok` settle only: the parsed result the terminal is written from, so a
         # process that dies before that terminal does not cost the evaluation (`settled_recovery`).
-        optional=("result",),
+        optional=("cost_evidence", "execution_timing", "executor_receipt", "reconciled_for_invocation", "result"),
     ),
     "eval_noise_floor": PayloadContract(
         "The repeated-seed spread of ONE candidate's metric: the run's own evaluation noise floor.",
@@ -2018,9 +2031,9 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(),
     ),
     "hint": PayloadContract(
-        "An operator hint pushed into the next proposals; `replace` swaps the standing one.",
+        "An operator direction; legacy `replace` swaps all, scoped IDs retain explicit retirement.",
         required=("text",),
-        optional=("replace", "source"),
+        optional=("directive_id", "replace", "review_nomination", "source", "status", "supersedes", "topic"),
         stored_whole=True,
     ),
     "holdout_evaluated": PayloadContract(
@@ -2081,12 +2094,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "inject_done": PayloadContract(
         "The fulfillment receipt for one `inject_node` request.",
         required=("idx",),
-        optional=(),
+        optional=("cancellation",),
     ),
     "inject_failed": PayloadContract(
         "An `inject_node` request that could not be materialized, with the reason.",
         required=("error", "idx", "reason"),
-        optional=(),
+        optional=("cancellation",),
     ),
     "inject_node": PayloadContract(
         "An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node.",
@@ -2097,7 +2110,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # were declared from the request allow-list, the same misreading as the comment rows
         # (review 2026-09-22, EVT-05).
         optional=(
-            "code", "code_commit", "deleted", "files", "forked_from", "idea", "job_role", "node_kind",
+            "code", "code_commit", "deleted", "expected_evaluator_digest", "files", "forked_from", "idea", "job_role", "node_kind",
             "origin", "parent_generations", "parent_id", "parent_ids", "uses", "uses_attempts"
         ),
         stored_whole=True,
@@ -2209,7 +2222,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("code", "files", "idea", "node_id", "operator", "parent_ids"),
         optional=(
             "attempt", "base_selector", "card_build_generation", "code_commit", "deleted",
-            "eval_start_boundary",
+            "eval_start_boundary", "expected_evaluator_digest",
             "footprint_finalized", "forked_from", "generation", "job_role", "materialize_aborted_intent",
             "model_arm", "node_kind", "origin", "parent_generations", "protocol_version",
             "research_origin", "seed", "simplified", "speculative", "uses", "uses_attempts"
@@ -2227,7 +2240,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "trials", "violations"
         ),
         optional=(
-            "activation", "attempt", "extra_metrics_direction", "extra_metrics_omitted",
+            "activation", "attempt", "executor_receipt", "extra_metrics_direction", "extra_metrics_omitted",
             "extra_metrics_provenance", "metric_provenance", "resource_curve", "self_metric",
             "stderr_tail", "task_metric"
         ),
@@ -2266,7 +2279,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "node_reset": PayloadContract(
         "The operator re-ran an existing node in place from a named stage.",
         required=("node_id",),
-        optional=("attempt", "from_stage", "generation"),
+        optional=("attempt", "from_stage", "generation", "resume_inputs"),
     ),
     "node_tombstoned": PayloadContract(
         "Nodes struck from selection without deleting their history.",
@@ -2342,7 +2355,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # operator-injected nodes the reserve was cut over, on any row whose count is not 0.
         # LOAD-BEARING: `replan` re-cuts an ordinary row whose count differs from the run's.
         optional=("at_node", "champion", "endgame_end", "endgame_start", "injected", "max_nodes",
-                  "phases", "reason", "reopen_cause", "reserve", "reserve_frac", "source",
+                  "node_count_basis", "phases", "reason", "reopen_cause", "reserve", "reserve_frac", "source",
                   "stall_champions"),
         stored_whole=True,
     ),
@@ -2413,6 +2426,21 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "A paid report refresh failed before anything was written — sanitized, retry-safe.",
         required=(),
         optional=("error_kind", "generation", "refresh_id"),
+    ),
+    "report_review_started": PayloadContract(
+        "An optional independent report-review paid claim, bound to exact report/native evidence.",
+        required=("generation", "input_digest", "request_digest", "review_id", "source_event_seq"),
+        optional=(),
+    ),
+    "report_review_completed": PayloadContract(
+        "An advisory independent-context review with exact native citations; no execution authority.",
+        required=("content", "generation", "request_digest", "review_id"),
+        optional=(),
+    ),
+    "report_review_failed": PayloadContract(
+        "A sanitized terminal failure of an optional paid review; never a replacement report.",
+        required=("error_kind", "generation", "request_digest", "review_id"),
+        optional=(),
     ),
     "report_refresh_started": PayloadContract(
         "The durable idempotency claim for one paid report refresh.",
@@ -2649,6 +2677,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "The run's trust gate was changed, by a named source (last write wins).",
         required=("source", "trust_gate"),
         optional=(),
+    ),
+    "metric_behavior_scan": PayloadContract(
+        "A numerical advisory co-metric observation, verified against original native outcomes; no verdict or gate.",
+        required=("authority", "checked_metrics", "detector", "evidence_digest", "generation", "limits",
+                  "node_id", "parameters", "question", "references", "shifted_metrics",
+                  "status", "strongest_shifts", "subject", "version"), optional=(),
     ),
     "trust_scan": PayloadContract(
         "Which trust detectors ran over one node's code, how many findings they made, over what digest.",

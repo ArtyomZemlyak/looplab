@@ -19,12 +19,17 @@ export function planStanding(state) {
   const ids = Object.keys(state?.nodes || {}).map(Number).filter(Number.isSafeInteger)
   const used = ids.length ? Math.max(...ids) + 1 : 0
   if (!plan || typeof plan !== 'object') return { inEndgame: false, budgetSpent: false }
+  const basis = plan.node_count_basis ?? 'all_nodes'
+  const count = basis === 'all_nodes' ? ids.length : plan.current_node_count
+  if (!['all_nodes', 'card_budget'].includes(basis) || !Number.isSafeInteger(count) || count < 0)
+    return { inEndgame: false, budgetSpent: false } // missing/unknown population cannot claim exhaustion
+  const budgetUsed = basis === 'card_budget' ? count : used
   const start = Number(plan.endgame_start)
   const end = plan.endgame_end == null ? null : Number(plan.endgame_end)
   const max = Number(plan.max_nodes)
   return {
-    inEndgame: Number.isFinite(start) && ids.length >= start && (end == null || ids.length < end),
-    budgetSpent: Number.isFinite(max) && max > 0 && used >= max,
+    inEndgame: Number.isFinite(start) && count >= start && (end == null || count < end),
+    budgetSpent: Number.isFinite(max) && max > 0 && budgetUsed >= max,
   }
 }
 

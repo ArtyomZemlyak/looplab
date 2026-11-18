@@ -160,10 +160,13 @@ class LessonReconcileMixin:
                         # so it names what was recorded or nothing at all.
                         acct = self_pair_repair_account(state, a)
                         where = ", ".join(acct["paths"][:3])
+                        # The original Idea predates its in-place repair. Only prose authored by
+                        # the repair ledger may explain what that repair changed.
+                        repair_why = "; ".join(acct["rationales"])[:90]
                         out.append(_lesson(
                             pr, f"a node that {self_pair_cause_phrase(acct)} was repaired in place"
                                 + (f" ({where})" if where else "") + " and then scored"
-                                + (f": {why}" if why else ""), "supported", 0.5))
+                                + (f": {repair_why}" if repair_why else ""), "supported", 0.5))
                         continue
                     out.append(_lesson(pr, f"a node failing with '{b.error_reason or 'error'}' "
                                            f"was fixed" + (f": {why}" if why else ""),

@@ -107,7 +107,12 @@ def test_runtime_holds_only_process_execution_modules():
                      # disagree, silence when there is no trainer artifact. Every POLICY that could
                      # read the record lives above this boundary, exactly as the three clauses here
                      # describe for the subject, input and coordinate sides.
-                     "effective_batch"}, (
+                     "effective_batch",
+                     # `cluster`, `cluster_rpc` and `cluster_worker` (2026-11-11) are the remote
+                     # process-execution face of `SubprocessSandbox`: bounded stdio RPC exchange
+                     # to an operator-declared worker argv and single-invocation child execution,
+                     # importing nothing above `core` while dispatch/scheduling policy stays in `engine/`.
+                     "cluster", "cluster_rpc", "cluster_worker"}, (
         "a module that is not process execution landed in runtime again")
 
 

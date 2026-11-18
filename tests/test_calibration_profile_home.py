@@ -451,7 +451,10 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 # 2026-10-08: upstream_author_rebase, upstream_hint_external (doc 73 §4.3), none removed (removing
 # them re-derives 8beb702f). INERT for a calibration replicate: no upstream block (no author, no live
 # advance), and the toy Developer is not an external CLI agent.
-_EXPECTED_DIGEST = "sha256:398f9b6eb20702f6dc2c4aa557abc7a9efb7d07fc1d2dceae7c951d37e9b541a"
+# 2026-11-12: + best_of_n_pilot, cluster_executor (both None); exact non-variant field growth
+# 296 -> 298. No fields removed. V1 envelope includes the new selectors; old receipts are
+# not silently accepted for the wider schema. Retirement-only compatibility is tested separately.
+_EXPECTED_DIGEST = "sha256:e2acfc2f8a57cf35822dfa01e32dc1f639bbe707218f572010f2151f925cd472"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -980,7 +983,9 @@ _EXPECTED_DIGEST = "sha256:398f9b6eb20702f6dc2c4aa557abc7a9efb7d07fc1d2dceae7c95
 # 2026-10-08: upstream_author_usd, upstream_advances_per_hour (doc 73 §4.2 G3/G4): 292 -> 294.
 # 2026-10-08: upstream_verify (doc 73 §4.2 G5, the canary gate): 294 -> 295.
 # 2026-10-08: upstream_author_rebase, upstream_hint_external (doc 73 §4.3): 295 -> 297.
-_EXPECTED_FIELD_COUNT = 297
+# 2026-11-11: 297 -> 296, inert cross_run_structured_claims retired. V1 reserves its exact
+# old False digest slot; behavior and the historical profile DIGEST remain byte-identical.
+_EXPECTED_FIELD_COUNT = 298
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

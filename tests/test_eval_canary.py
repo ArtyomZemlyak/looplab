@@ -478,6 +478,9 @@ def test_a_canary_slow_only_on_its_first_run_passes_on_the_one_retry(tmp_path):
     assert term.type == "node_evaluated" and term.data["metric"] == 0.9
     assert researcher.triaged == [] and dev.errors == []
     assert canary_already_passed(evs, 0, 0, finished[1].data["code_digest"])
+    assert finished[0].data["equivalence_digest"] == finished[1].data["equivalence_digest"]
+    assert canary_already_passed(evs, 0, 0, finished[1].data["code_digest"],
+                                 equivalence_digest=finished[0].data["equivalence_digest"])
     # Both rounds are this attempt's eval seconds, like the full eval's own.
     assert term.data["eval_seconds"] >= sum(f.data["eval_seconds"] for f in finished) - 0.01
 

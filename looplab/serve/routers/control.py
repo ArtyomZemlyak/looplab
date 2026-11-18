@@ -34,6 +34,7 @@ from looplab.serve.launch import (
     validate_idempotency_key,
 )
 from looplab.serve.principal import request_agent_credential, request_agent_token
+from looplab.serve.pending_inject import PendingInjectCancellationBody
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD, GENESIS_CHAT_SEQ_BASE
 from looplab.serve.reset_route import durable_reset_run
 from looplab.serve.settings_store import SettingsRevisionConflict
@@ -250,6 +251,20 @@ def build_router(srv) -> APIRouter:
         _command_response_headers(response)
         return srv.commands.retry(_run_dir(run_id), command_id,
                                   agent_token=request_agent_token(request))
+
+    @router.get("/api/runs/{run_id}/pending-inject")
+    def pending_inject_identity(run_id: str, command_id: str, expected_generation: str):
+        """Read an original command's exact queue identity; this grants no cancellation authority."""
+        from looplab.serve.pending_inject import pending_identity
+        return pending_identity(srv.commands, _run_dir(run_id), command_id, expected_generation)
+
+    @router.post("/api/runs/{run_id}/pending-inject-cancellation")
+    async def cancel_pending_inject(run_id: str, body: PendingInjectCancellationBody, request: Request):
+        """Cancel only an exact unmaterialized inject head with stopped ownership; never spawn."""
+        from looplab.serve.pending_inject import cancel
+        agent = request_agent_token(request)
+        return await anyio.to_thread.run_sync(
+            lambda: cancel(srv.commands, _run_dir(run_id), body, agent_token=agent))
 
     @router.post("/api/runs/{run_id}/resolve-activity-claims")
     async def resolve_activity_claims(run_id: str, request: Request, response: Response):

@@ -18,7 +18,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -85,6 +91,12 @@
         "invocation_id": "legacy:r:n0:g0:a1",
         "outcome": "ok",
         "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        },
         "result": {
           "v": 1,
           "metric": 0.1,
@@ -105,6 +117,41 @@
         "extra_metrics": {},
         "violations": [],
         "trials": []
+      }
+    ],
+    [
+      "metric_behavior_scan",
+      {
+        "authority": "advisory_observation_only",
+        "checked_metrics": 0,
+        "detector": "metric_regime_shift",
+        "evidence_digest": "71ae9cffc91a6cb00a888365682710b6158c34c68226924ba192e028926d56a4",
+        "generation": 0,
+        "limits": "Uncalibrated numerical heuristic over declared native scalar readers; no causal, cheating, faithfulness or quality verdict. Missing or self-reported metrics are not treated as checked.",
+        "node_id": 0,
+        "parameters": {
+          "reference_window": 32,
+          "min_references": 3,
+          "min_common_metrics": 3,
+          "ratio_bound": 2.0,
+          "shift_fraction": 0.25
+        },
+        "question": "Do these co-metric changes match the intended objective, or did the population, target or evaluator change?",
+        "references": [],
+        "shifted_metrics": 0,
+        "status": "insufficient_evidence",
+        "strongest_shifts": [],
+        "subject": {
+          "node_id": 0,
+          "attempt": 0,
+          "terminal_event_seq": 7,
+          "protocol_version": null,
+          "metric": 0.1,
+          "feasible": true,
+          "declared_metric_count": 0,
+          "observation_digest": "a45522054f6da4092a57ce5f857a93342592d431e9c1960eea8557c61a39ddec"
+        },
+        "version": 1
       }
     ],
     [
@@ -161,7 +208,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -204,7 +257,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -247,7 +306,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -296,7 +361,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -339,7 +410,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -382,7 +459,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -431,7 +514,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -480,7 +569,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -539,7 +634,13 @@
         "attempt": 1,
         "invocation_id": "legacy:r:n0:g0:a1",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -620,7 +721,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -686,7 +793,13 @@
         "attempt": 1,
         "invocation_id": "legacy:r:n0:g0:a1",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -752,7 +865,13 @@
         "attempt": 2,
         "invocation_id": "legacy:r:n0:g0:a2",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -822,7 +941,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -888,7 +1013,13 @@
         "attempt": 1,
         "invocation_id": "legacy:r:n0:g0:a1",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -954,7 +1085,13 @@
         "attempt": 2,
         "invocation_id": "legacy:r:n0:g0:a2",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -992,7 +1129,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -1028,7 +1171,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -1064,7 +1213,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -1100,7 +1255,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -1163,6 +1324,41 @@
       }
     ],
     [
+      "metric_behavior_scan",
+      {
+        "authority": "advisory_observation_only",
+        "checked_metrics": 0,
+        "detector": "metric_regime_shift",
+        "evidence_digest": "2bd146763d92e6ed81107ccf6af7166d31ea3db4c00567b01e16cc2ad6841c68",
+        "generation": 0,
+        "limits": "Uncalibrated numerical heuristic over declared native scalar readers; no causal, cheating, faithfulness or quality verdict. Missing or self-reported metrics are not treated as checked.",
+        "node_id": 0,
+        "parameters": {
+          "reference_window": 32,
+          "min_references": 3,
+          "min_common_metrics": 3,
+          "ratio_bound": 2.0,
+          "shift_fraction": 0.25
+        },
+        "question": "Do these co-metric changes match the intended objective, or did the population, target or evaluator change?",
+        "references": [],
+        "shifted_metrics": 0,
+        "status": "insufficient_evidence",
+        "strongest_shifts": [],
+        "subject": {
+          "node_id": 0,
+          "attempt": 0,
+          "terminal_event_seq": 8,
+          "protocol_version": null,
+          "metric": 0.74325,
+          "feasible": false,
+          "declared_metric_count": 0,
+          "observation_digest": "29cada7f2ee0e2fbeadef292a9511c1616b39033ce394922728f10a8e23497d8"
+        },
+        "version": 1
+      }
+    ],
+    [
       "trust_scan",
       {
         "node_id": 0,
@@ -1216,7 +1412,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -1299,6 +1501,41 @@
       }
     ],
     [
+      "metric_behavior_scan",
+      {
+        "authority": "advisory_observation_only",
+        "checked_metrics": 0,
+        "detector": "metric_regime_shift",
+        "evidence_digest": "8e558e7e6082420e43f15be0cda837cdd45ce4b9e2f3457d46086bd783628f36",
+        "generation": 0,
+        "limits": "Uncalibrated numerical heuristic over declared native scalar readers; no causal, cheating, faithfulness or quality verdict. Missing or self-reported metrics are not treated as checked.",
+        "node_id": 0,
+        "parameters": {
+          "reference_window": 32,
+          "min_references": 3,
+          "min_common_metrics": 3,
+          "ratio_bound": 2.0,
+          "shift_fraction": 0.25
+        },
+        "question": "Do these co-metric changes match the intended objective, or did the population, target or evaluator change?",
+        "references": [],
+        "shifted_metrics": 0,
+        "status": "insufficient_evidence",
+        "strongest_shifts": [],
+        "subject": {
+          "node_id": 0,
+          "attempt": 0,
+          "terminal_event_seq": 9,
+          "protocol_version": null,
+          "metric": 0.74325,
+          "feasible": false,
+          "declared_metric_count": 0,
+          "observation_digest": "3eeecf0ea156d1fb5c1342a12ae995db8c978fea21ef0f7b7f226a9bb3045c8c"
+        },
+        "version": 1
+      }
+    ],
+    [
       "trust_scan",
       {
         "node_id": 0,
@@ -1352,7 +1589,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -1435,6 +1678,41 @@
       }
     ],
     [
+      "metric_behavior_scan",
+      {
+        "authority": "advisory_observation_only",
+        "checked_metrics": 0,
+        "detector": "metric_regime_shift",
+        "evidence_digest": "8e558e7e6082420e43f15be0cda837cdd45ce4b9e2f3457d46086bd783628f36",
+        "generation": 0,
+        "limits": "Uncalibrated numerical heuristic over declared native scalar readers; no causal, cheating, faithfulness or quality verdict. Missing or self-reported metrics are not treated as checked.",
+        "node_id": 0,
+        "parameters": {
+          "reference_window": 32,
+          "min_references": 3,
+          "min_common_metrics": 3,
+          "ratio_bound": 2.0,
+          "shift_fraction": 0.25
+        },
+        "question": "Do these co-metric changes match the intended objective, or did the population, target or evaluator change?",
+        "references": [],
+        "shifted_metrics": 0,
+        "status": "insufficient_evidence",
+        "strongest_shifts": [],
+        "subject": {
+          "node_id": 0,
+          "attempt": 0,
+          "terminal_event_seq": 9,
+          "protocol_version": null,
+          "metric": 0.74325,
+          "feasible": false,
+          "declared_metric_count": 0,
+          "observation_digest": "3eeecf0ea156d1fb5c1342a12ae995db8c978fea21ef0f7b7f226a9bb3045c8c"
+        },
+        "version": 1
+      }
+    ],
+    [
       "trust_scan",
       {
         "node_id": 0,
@@ -1488,7 +1766,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -1557,6 +1841,41 @@
       }
     ],
     [
+      "metric_behavior_scan",
+      {
+        "authority": "advisory_observation_only",
+        "checked_metrics": 0,
+        "detector": "metric_regime_shift",
+        "evidence_digest": "cae49361af70134fb64e187263075ac5d66ddecafcd4522f65dbdbb4449922ed",
+        "generation": 0,
+        "limits": "Uncalibrated numerical heuristic over declared native scalar readers; no causal, cheating, faithfulness or quality verdict. Missing or self-reported metrics are not treated as checked.",
+        "node_id": 0,
+        "parameters": {
+          "reference_window": 32,
+          "min_references": 3,
+          "min_common_metrics": 3,
+          "ratio_bound": 2.0,
+          "shift_fraction": 0.25
+        },
+        "question": "Do these co-metric changes match the intended objective, or did the population, target or evaluator change?",
+        "references": [],
+        "shifted_metrics": 0,
+        "status": "insufficient_evidence",
+        "strongest_shifts": [],
+        "subject": {
+          "node_id": 0,
+          "attempt": 0,
+          "terminal_event_seq": 9,
+          "protocol_version": null,
+          "metric": 0.74325,
+          "feasible": true,
+          "declared_metric_count": 0,
+          "observation_digest": "de19230129960b721ed3e8cbc2494c8e34a7a2261f6e373d011c19258a385a8b"
+        },
+        "version": 1
+      }
+    ],
+    [
       "trust_scan",
       {
         "node_id": 0,
@@ -1611,6 +1930,12 @@
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "ok",
         "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        },
         "result": {
           "v": 1,
           "metric": 0.99,
@@ -1719,6 +2044,41 @@
       }
     ],
     [
+      "metric_behavior_scan",
+      {
+        "authority": "advisory_observation_only",
+        "checked_metrics": 0,
+        "detector": "metric_regime_shift",
+        "evidence_digest": "7dd21fa21b3bff64548f326e9f273e4a608792acedfb458c223b4e41f248bbff",
+        "generation": 0,
+        "limits": "Uncalibrated numerical heuristic over declared native scalar readers; no causal, cheating, faithfulness or quality verdict. Missing or self-reported metrics are not treated as checked.",
+        "node_id": 0,
+        "parameters": {
+          "reference_window": 32,
+          "min_references": 3,
+          "min_common_metrics": 3,
+          "ratio_bound": 2.0,
+          "shift_fraction": 0.25
+        },
+        "question": "Do these co-metric changes match the intended objective, or did the population, target or evaluator change?",
+        "references": [],
+        "shifted_metrics": 0,
+        "status": "insufficient_evidence",
+        "strongest_shifts": [],
+        "subject": {
+          "node_id": 0,
+          "attempt": 0,
+          "terminal_event_seq": 4,
+          "protocol_version": null,
+          "metric": 0.99,
+          "feasible": true,
+          "declared_metric_count": 1,
+          "observation_digest": "cf3cc533071c28996b2e4b0bb8bd9a48b0f65bd270817b66a05dd2ac93d34167"
+        },
+        "version": 1
+      }
+    ],
+    [
       "trust_scan",
       {
         "node_id": 0,
@@ -1773,6 +2133,12 @@
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "ok",
         "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        },
         "result": {
           "v": 1,
           "metric": 0.99,
@@ -1816,6 +2182,41 @@
           "unbound_reason": "not_declared",
           "subjects": []
         }
+      }
+    ],
+    [
+      "metric_behavior_scan",
+      {
+        "authority": "advisory_observation_only",
+        "checked_metrics": 0,
+        "detector": "metric_regime_shift",
+        "evidence_digest": "a06c6cf6f78371a5dcdd2ec5c1ff15de9cb99457a8af7da1826e7c9a1b260c1f",
+        "generation": 0,
+        "limits": "Uncalibrated numerical heuristic over declared native scalar readers; no causal, cheating, faithfulness or quality verdict. Missing or self-reported metrics are not treated as checked.",
+        "node_id": 0,
+        "parameters": {
+          "reference_window": 32,
+          "min_references": 3,
+          "min_common_metrics": 3,
+          "ratio_bound": 2.0,
+          "shift_fraction": 0.25
+        },
+        "question": "Do these co-metric changes match the intended objective, or did the population, target or evaluator change?",
+        "references": [],
+        "shifted_metrics": 0,
+        "status": "insufficient_evidence",
+        "strongest_shifts": [],
+        "subject": {
+          "node_id": 0,
+          "attempt": 0,
+          "terminal_event_seq": 4,
+          "protocol_version": null,
+          "metric": 0.99,
+          "feasible": false,
+          "declared_metric_count": 0,
+          "observation_digest": "a999d516bdd4da2274667a1905fa9eeb5a12789153db703c1c0a3c0bc62500a8"
+        },
+        "version": 1
       }
     ],
     [
@@ -1872,7 +2273,13 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [
@@ -1930,7 +2337,13 @@
         "attempt": 1,
         "invocation_id": "legacy:r:n0:g0:a1",
         "outcome": "failed",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "execution_timing": {
+          "evaluator_return_seconds": "<volatile>",
+          "post_evaluator_seconds": "<volatile>",
+          "advisory_review": "not_required",
+          "resource_occupancy": "not_measured"
+        }
       }
     ],
     [

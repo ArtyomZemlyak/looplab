@@ -3,7 +3,7 @@
 Дата проверки: 17 ноября 2026. Проверен **настоящий remote master
 `7c45d5d9f04533751e2b04a05d3c4fdbb70fe7cb`**, а не копия живого сервиса.
 Изолированная серия до `5a1e6ef699b6038702e67ea9bde23e2ff2e83216` рассмотрена только
-как **неопубликованная реализация**. Она не включена этим audit commit и не считается
+как **неопубликованная реализация на момент исходного аудита**. Последующее прямое поручение USER разрешило source-интеграцию; см. addendum ниже. Она не считается
 развёрнутой. Никакой live service, ML-процесс, hook, lease или scientific protocol не изменён.
 
 ## 1. Что произошло и что числа не доказывают
@@ -91,7 +91,9 @@ lease, и требует ответы monitor. Последнее соответ
 
 ### 6.1. Ожидаемая evaluator identity кандидата
 
-OPEN[external-launch-lacks-attempt-bound-evaluator] На master submit допускает candidate/source/role без expected evaluator identity; `_eval_pipeline` берёт общий task evaluator. F3 воспроизводит footgun, а не сломанный CAS. proof:absent:expected_evaluator_digest@looplab/harness/composite.py
+*Закрыто 2026-11-18, ветка `ang_review_2026_11_17`: канонический `evaluator_digest` (`looplab/core/evaluator_identity.py`, `looplab/engine/shared.py::run_dir_evaluator_digest`) хэширует эффективный `eval_spec`, защищённые базовые файлы в `editable_path`, маунты `data`/`references`, `data_content` из `protocol_amendments.jsonl` и task `assets`. Он публикуется как `current_evaluator_digest` в `harness-progress` (включая `brief=true`), принимается как опциональный `expected_evaluator_digest` в `submit_experiment` и `inject_node` (отсутствие поля явно маркируется `evaluator_binding="unpinned_legacy"`), проверяется fail-closed (`409 stale_evaluator_digest`) на admission с сохранением идемпотентного реплея `key:inject` и повторно проверяется перед резервированием GPU и в `_eval_admit`/`_eval_run_attempt` (`EvaluationAdmissionRefusal("stale_evaluator_digest")` при `eval_seconds=0.0` + `pause`). Тесты: `tests/test_evaluator_identity_and_canary_reuse.py`.*
+
+Независимое ревью 18 ноября: namespace каждого editable, glob- и directory-защита учитываются при хэшировании. Нечитаемый, слишком большой (>16 MiB) защищённый файл или неполный обход (>4096 members) не получают переиспользуемую identity. Проверки: `tests/test_antigravity_review_regressions.py`.
 
 Решение: authored expected resolved command/protocol digest с exact source и attempt. Проверять
 на admission и повторно перед dispatch **до** lease/model work, при несовпадении fail closed.
@@ -104,7 +106,9 @@ Absence выбранного символа — временный structural fa
 
 ### 6.2. Resume input внутри пересоздаваемого workspace
 
-OPEN[retry-inputs-lack-rematerialization-preflight] Перед cleanup нет preflight явно объявленных resume dependencies, находящихся внутри disposable node workdir. Очистка сама корректна; отсутствует ранняя защита от потери таких объявленных inputs. proof:absent:retry_input_preflight@looplab/engine/workspace.py
+*Закрыто 2026-11-18, ветка `ang_review_2026_11_17`: явная декларация `resume_inputs` (`looplab/core/retry_inputs.py`, `looplab/engine/workspace.py::retry_input_preflight`) проверяется на приёме `retry_node`/`node_reset` и повторно в `WorkspaceSeeder.materialize` **до** архивации логов и `rmtree_readonly_aware(wd)`. Ссылки внутрь пересоздаваемого `nodes/node_<id>` или `canary/` (включая внешние симлинки и вложенные симлинки директорий) отвергаются с `ephemeral_resume_input` до удаления старой попытки; отсутствующие объявленные пути дают `missing_resume_input` (в отличие от штатной очистки необъявленного output), расхождение попытки/квитанции — `resume_input_attempt_drift`, несовпадение `sha256` — `resume_input_integrity_mismatch`, при сохранении legacy поведения и stage reuse. Тесты: `tests/test_retry_input_preflight.py`.*
+
+Независимое ревью 18 ноября: также отклоняются ancestor-каталоги и цепочки directory symlinks. Неполный обход (>512 entries или unreadable directory) возвращает `resume_input_scan_incomplete`; нельзя считать непроверенный хвост безопасным. После архивирования, непосредственно перед удалением, входы проверяются снова. Проверки: `tests/test_antigravity_review_regressions.py`.
 
 Решение: отдельная явная декларация resume inputs с identity/durability, containment проверкой
 и validation **до** удаления. Refuse ephemeral/self-dependent references, назвать конкретную
@@ -116,7 +120,7 @@ OPEN[retry-inputs-lack-rematerialization-preflight] Перед cleanup нет pr
 
 ### 6.3. Известный completion barrier, реализация ещё не опубликована
 
-OPEN[completed-eval-waits-for-advisory-monitor] Успешный completed evaluator в master ждёт каждый unanswered live checkpoint. Slug уже использовался прежним isolated audit; здесь восстановлен учёт отсутствующего в master fix, а не объявлена новая идея. proof:absent:close_completed_observations@looplab/engine/external_watch.py
+*Source integration 2026-11-17:* `completed-eval-waits-for-advisory-monitor` is implemented by the existing `ab76e01` source change; integrated acceptance is recorded in the integration receipt. This is not a statement about live runtime adoption or physical GPU release.
 
 Существующий `ab76e01` сохраняет unresolved advisory review отдельно от execution terminal.
 Нужна интеграция с meaningful acceptance, не новый бот auto-answer и не invented continue.
@@ -138,7 +142,9 @@ OPEN[completed-eval-waits-for-advisory-monitor] Успешный completed evalu
   удаляет receipt внутри node workdir и сохраняет внешний. Это воспроизводит документированные
   hazards, а не утверждает, что движок обещал сохранить произвольный output.
 - Notification source review опроверг гипотезу о потере attempt identity: native generation
-  сохраняется в outbox details. Только human headline его не выводит; отдельный OPEN не создан.
+  сохраняется в outbox details. На момент исходного аудита human headline его не выводил
+  (в ветке `ang_review_2026_11_17` номер попытки `(gen <N>)` добавлен в human summaries
+  `node_evaluated`, `node_failed`, `stage_failed` и `monitor_question`); отдельный OPEN не создан.
 
 Синтетические CPU evidence snapshots сохранены в
 [audit evidence](audit/external-engine-idle-probes-20261117.json). Пробы не запускали модель,
@@ -208,3 +214,7 @@ OPEN[completed-eval-waits-for-advisory-monitor] Успешный completed evalu
 | `read-fence-inputs-are-writable-by-the-fenced-process` | Ограничение контракта/консервативный выбор сохранён; обещанием не закрывать. |
 | `read-fence-self-protection-ends-at-an-unfenced-child` | Ограничение контракта/консервативный выбор сохранён; обещанием не закрывать. |
 | `punched-dir-is-not-listable` | Нужна приёмка на целевой платформе; Linux CPU не доказывает Windows/remote поведение. |
+
+## 9. Source integration addendum, 17 November 2026
+
+After the original audit publication, the user explicitly authorized integration of the complete accepted source series through `5a1e6ef6` into actual remote master, preserving this audit and its two new integration items. The original58-item census remains a historical baseline, not the post-integration OPEN inventory. Source closures require implementation plus meaningful integrated tests; measurement/platform/end-to-end UNKNOWNs remain open. Live services, client, mirror, hooks, ML and leases remain unchanged. No deployment is part of this source publication.

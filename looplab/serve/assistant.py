@@ -2015,6 +2015,16 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     from looplab.tools.run_control_tools import RunControlTools, TraceRewriteFns
     from looplab.tools.run_launcher_tools import RunLauncherTools
 
+    def report_review_fns():
+        # Only the UI command composition root has a native paid-receipt host. Standalone
+        # tools keep their original specs, and no model call is made by either reader.
+        host = getattr(command_service, "srv", None)
+        if host is None:
+            return {}
+        from looplab.serve.report_review import read_nomination, review_view
+        return {"report_review_reader": lambda rd: review_view(host, rd),
+                "report_nomination_reader": lambda rd, seq, nom: read_nomination(host, rd, seq, nom)}
+
     def trace_rewrite_fns() -> TraceRewriteFns:
         # Composition boundary: the tool package remains below ``serve`` and receives the three
         # serving-owned trace-clear transaction primitives explicitly instead of importing upward.
@@ -2053,6 +2063,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                 mutation_journal_path=mutation_journal_path,
                 mutation_recovery=True,
                 trace_rewrite=trace_rewrite_fns(),
+                **report_review_fns(),
                 allow_inject=assistant_inject_enabled(settings),
                 allow_tracks=assistant_track_enabled(settings)))
         providers.append(TodoTools(on_todos=on_todos))
@@ -2103,6 +2114,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                                       mutation_journal_path=mutation_journal_path,
                                       mutation_recovery=mutation_recovery,
                                       trace_rewrite=trace_rewrite_fns(),
+                                      **report_review_fns(),
                                       allow_inject=assistant_inject_enabled(settings),
                                       allow_tracks=assistant_track_enabled(settings))]
     providers.append(TodoTools(on_todos=on_todos))

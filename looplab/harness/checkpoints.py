@@ -1,7 +1,7 @@
 """Durable, lifecycle-fenced questions asked of the external agent during an eval.
 
-The engine never calls a model here. A stage cannot advance until its question is
-answered; a live observer can ask while the subprocess is running. The append-only
+The engine never calls a model here. Stage/deadline gates require an explicit answer;
+live observers preserve unresolved review separately once their evaluator returns. The append-only
 ledger survives server and engine restarts, and answers are bound to a run incarnation
 and the exact node lifecycle. The engine does not trust an answer about a different
 checkpoint or a completed/reset node.
@@ -188,6 +188,40 @@ def close_unanswered(rd: Path, checkpoint_ids, reason: str) -> list[str]:
     return closed
 
 
+def close_completed_observations(rd: Path, checkpoint_ids, node_id: int, node_generation: int) -> list[str]:
+    """Close only the operational stop question of a returned evaluator, without answering review.
+
+    The observation stays immutable. This is neither a healthy verdict nor permission for another
+    attempt; stage/deadline gates are never eligible, and reset/reclaim fences are retained.
+    """
+    events = _events(rd)
+    state = fold(events)
+    node = state.nodes.get(node_id)
+    if node is None or node.attempt != node_generation or node.status != "pending":
+        return []
+    generation = run_generation_token(events)
+    claim_seq = _claim_seq(events, node_id, node_generation)
+    path = _path(rd)
+    closed = []
+    with interprocess_lock(Path(str(path) + ".lock"), required=True):
+        questions, resolutions = _projection(_rows(path))
+        for cid in checkpoint_ids:
+            q = questions.get(cid)
+            if (q is None or cid in resolutions or q["phase_id"] not in ("train_monitor", "asha_live")
+                    or q["node_id"] != node_id or q["node_generation"] != node_generation
+                    or q["run_uid"] != state.run_uid or q["run_generation"] != generation
+                    or q["claim_seq"] != claim_seq):
+                continue
+            append_jsonl_bytes_locked(path, orjson.dumps({
+                "type": "closure", "checkpoint_id": cid, "disposition": "ended_before_decision",
+                "review_status": "unreviewed", "answerer": "engine", "closed_at": time.time(),
+                "action_id": f"ended:{cid}",
+                "reason": "The evaluator returned before a decision; its observation remains unreviewed."
+            }))
+            closed.append(cid)
+    return closed
+
+
 def answer_for(rd: Path, checkpoint_id: str) -> dict | None:
     events = _events(rd)
     state = fold(events)
@@ -239,6 +273,9 @@ def respond(srv, rd: Path, body, *, answerer: str = "agent") -> dict:
                     raise HTTPException(404, "checkpoint not found in this run incarnation")
                 previous = answers.get(body.checkpoint_id)
                 if previous:
+                    if previous.get("type") == "closure":
+                        raise HTTPException(409, {"code": "checkpoint_execution_ended",
+                                                  "message": "The evaluator ended; its observation remains unreviewed."})
                     if (previous["action_id"] != body.action_id
                             or previous["verdict"] != body.verdict
                             or previous["failure_kind"] != body.failure_kind

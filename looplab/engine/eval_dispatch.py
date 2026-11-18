@@ -328,10 +328,12 @@ def _eval_time_admission_refused(engine, state, node, max_es) -> bool:
     `tests/test_eval_time_reservation.py` admits one lane and asserts the next is refused while it
     is still running, which no stub can satisfy.
     """
+    unsettled_seconds = getattr(engine, "_unsettled_eval_seconds", None)
     reserved_seconds = getattr(engine, "_reserved_eval_seconds", None)
     estimate_seconds = getattr(engine, "_eval_seconds_estimate", None)
     return eval_time_admission_blocked(
-        float(getattr(state, "total_eval_seconds", 0.0) or 0.0),
+        float(getattr(state, "total_eval_seconds", 0.0) or 0.0)
+        + (float(unsettled_seconds()) if callable(unsettled_seconds) else 0.0),
         float(reserved_seconds()) if callable(reserved_seconds) else 0.0,
         float(estimate_seconds(node)) if callable(estimate_seconds) else 0.0,
         max_es,
@@ -1632,371 +1634,267 @@ class EvalDispatchMixin:
             if research:
                 self._spawn_research(_DeferredBudgetStop(bg_tg, budget_stop), state)
             try:
-                if self._eval_parallel <= 1:
-                    limiter = anyio.CapacityLimiter(1)
-                    for a in evals:
-                        if budget_stop:
-                            break        # the ceiling fired: finish what is running, start nothing
-                        cur_events = self.store.read_all()
-                        cur = fold(cur_events)
-                        # This lane's `(tail_seq, state)`: moved by the resource wait's tail gate
-                        # below, and HANDED to the evaluation's ADMIT when it starts (EVT-04).
-                        waited_fold = (cur_events[-1].seq if cur_events else -1, cur)
-                        if self._skip_if_aborted(a, cur):
-                            continue
-                        # Re-check the eval-compute budget BEFORE each eval (not just per loop
-                        # iteration), so a multi-eval batch can't overshoot by a whole batch (#2/#25).
-                        # Through the reservation rule, like the parallel branch: on this branch the
-                        # ledger is empty at this point (the previous eval was awaited and its
-                        # `finally` released), so the answer is the historical completed-time one —
-                        # but the QUESTION is now asked in one place for both branches.
+                # G3 distributed/parallel eval: CONTINUOUS dispatch. A pool of `max_parallel` slots
+                # is kept FULL — the instant any eval finishes and the dispatcher worker returns
+                # its lifecycle reservation to `_free_gpus`, the producer admits the NEXT
+                # queued eval into that slot. This closes the head-of-line gap the old
+                # `started >= max_parallel: break` left: that break capped the batch at max_parallel
+                # STARTED and deferred the rest to a FUTURE spine iteration, so a short eval that
+                # freed its GPU left it idle for the whole remaining life of a long sibling (the
+                # 10h-vs-1h case). The semaphore bounds concurrency to max_parallel AND refills a
+                # freed slot; each eval adopts its own token and may yield it for LLM repair.
+                # Width one uses this same producer, instead of awaiting the whole repair chain.
+                # fast_acquire: when a slot is already free the admit takes no checkpoint, so a batch
+                # that fits in the pool behaves like the old tight loop (all started before any child
+                # runs); the checkpoint only happens on the genuine refill wait.
+                #
+                # STILL A BARRIER: the inner task group joins the WHOLE batch before returning, so
+                # `bg_tg`'s lifecycle is unchanged. It no longer says anything about a
+                # "`pending_nodes()`-keyed guarantee", and that clause was stale from F1f: the
+                # run-scoped eval group means a node stays `pending` across outer-loop turns this
+                # barrier never sees, and since F1i the node-count cadences no longer key on that
+                # predicate at all (`engine/cadence.py::at_creation_boundary`).
+                # CAPTURE the width beside the semaphore. `anyio.Semaphore` cannot be resized, so
+                # its token TOTAL is this batch's real concurrency for the batch's whole life —
+                # while `self._eval_parallel` is live and has three writers that move it mid-batch
+                # (the Strategist, an operator `budget_extend`, and since docs/29 F1 the
+                # proposal-derived re-pin). The drained-pool test below asks "are all my tokens but
+                # one free?", which is a question about THIS semaphore and must be asked of its own
+                # total. Against the live attribute it broke in both directions: LOWERED mid-batch
+                # (4 -> 2) the test fires with 3 siblings still holding GPUs, so a wide head is
+                # declared unsatisfiable while the devices it wants are merely busy — and
+                # `head_unsatisfiable` is sticky until the head changes, so it starves for the rest
+                # of its queue lifetime, which is the exact defect `_HEAD_BYPASS_LIMIT` exists to
+                # prevent. RAISED mid-batch (2 -> 4) the test needs `slots.value >= 3` from a
+                # semaphore whose maximum is 2, so it can never fire and a genuinely unsatisfiable
+                # head wedges the batch on `_wait_for_gpu_change` with nothing running to move the
+                # epoch. `_settle_proposal_width` only re-pins between batches, so this is defence
+                # in depth for that writer — but it is the ONLY thing holding the line for the
+                # other two, which have always been able to fire mid-batch.
+                batch_width = max(1, int(self._eval_parallel))
+                slots = anyio.Semaphore(batch_width, fast_acquire=True)
+
+                async def _eval_in_slot(nid: int, generation: Optional[int],
+                                        reservation: Optional[dict], admission_fold=None) -> None:
+                    from looplab.engine.repair_slots import RepairableEvalSlot
+                    slot = RepairableEvalSlot(slots)
+                    try:
+                        if admission_fold is None:
+                            await self._evaluate(nid, slot, max_es)
+                        else:
+                            with handed_admission_fold(nid, *admission_fold):
+                                await self._evaluate(nid, slot, max_es)
+                    except BaseException as exc:  # noqa: BLE001 — re-raised unless a run stop
+                        # A SPEND CEILING THIS EVALUATION CROSSED is deferred into the same sink
+                        # the overlapped research uses (review 2026-09-22, ENG2-02), never raised
+                        # into `tg`, where it cancelled every sibling lane mid-score. The refill
+                        # gate below then admits nothing more, and the method re-raises the stop
+                        # once the batch has joined. See `core/errors.py::deferrable_budget_stop`.
+                        # A refused run setup (ENG2-08) rides the same sink, so a batch whose
+                        # lanes all stopped on it ends the run on ONE refusal, not a group.
+                        stop = deferrable_run_stop(exc)
+                        if stop is None:
+                            raise
+                        budget_stop.append(stop)
+                    finally:
+                        # The eval-second allowance this lane committed at admission goes back
+                        # BEFORE the slot does: the producer wakes on `slots.release()` and
+                        # immediately asks whether one more lane fits, and it must ask that with
+                        # this lane's worst case already handed back — its REAL cost is in the log
+                        # by now and `total_eval_seconds` charges it.
+                        _release_eval_time(self, nid, generation)
+                        if reservation is not None and generation is not None:
+                            self._settle_eval_resource_reservation(nid, generation, reservation)
+                        slot.close()  # a parked repair already returned its own token
+
+                async with anyio.create_task_group() as tg:
+                    pending = list(evals)
+                    # Bounded aging state for the scan below (see _HEAD_BYPASS_LIMIT).
+                    head_id: Optional[int] = None
+                    head_bypasses = 0
+                    head_unsatisfiable = False
+                    waiting_snapshot = None
+                    while pending:
+                        # Fresh fold PER ADMISSION (like the serial branch, unlike the old fold-once):
+                        # continuous dispatch means earlier evals in THIS batch complete mid-loop, so
+                        # the abort-skip and the eval-budget guard both act on LIVE state — strictly
+                        # stricter than the dead fold-once check the old comment flagged.
+                        # A parent waiting for width must not fold a prefix it already moved into
+                        # its previous child. Acquire first, then own one fresh admission snapshot.
+                        await slots.acquire()
+                        tail_reader = getattr(self, "_fold_if_tail_moved", None) if batch_width == 1 else None
+                        if waiting_snapshot is not None and callable(tail_reader):
+                            waited_fold = tail_reader(waiting_snapshot)
+                            cur = waited_fold[1]
+                        else:
+                            initial_events = self.store.read_all()
+                            cur = fold(initial_events)
+                            waited_fold = (initial_events[-1].seq if initial_events else -1, cur)
                         if _eval_time_admission_refused(self, cur, None, max_es):
+                            slots.release()
                             break
-                        node = cur.nodes.get(a["node_id"])
-                        reservation = None
-                        generation = None
-                        skip_eval = False
-                        # The wait below is the one place on this branch where a deferred ceiling
-                        # can land between the loop-top `break` and `_evaluate` — see
-                        # `budget_stop_recheck` for the hours it cost. It is asked at the head of
-                        # every tick and again the instant a reservation is granted; a stop found
-                        # there skips the eval, and the loop-top test then ends the queue.
-                        if node is not None and hasattr(self, "_wait_reserve_node_resources"):
-                            generation = node.attempt
-                            # The wait's own tail-gated fold, loop-local and handed to nobody: with
-                            # the cross-run host lease this wait lasts as long as ANOTHER run holds
-                            # the pool (hours of training), and an unconditional re-fold per 0.5s
-                            # tick was an O(total-events) busy-poll — the cost confirm F26 documents.
-                            # SEEDED with the loop-top fold above, whose tail nothing has moved
-                            # since (review 2026-09-22, EVT-04): `None` here re-folded that identical
-                            # prefix on EVERY eval's first tick, 60 times in a 60-node toy run. The
-                            # gate still re-folds the moment anything appends.
-                            while True:
-                                if budget_stop_recheck(budget_stop):
-                                    skip_eval = True
-                                    break
-                                # Resource waits must not pin a stale fold forever.  A GPU->CPU Card
-                                # re-pin does not release a GPU (and therefore does not bump the pool
-                                # epoch), so re-fold after every bounded condition tick and fence the
-                                # exact lifecycle plus run-level operator gates before retrying.
-                                # The tail gate keeps that promise exactly: a re-pin APPENDS
-                                # (`EV_CARD_RESOURCE_PINNED`), as does every operator gate this loop
-                                # re-checks, so nothing it reacts to can land without moving the tail
-                                # — see `_fold_if_tail_moved` for why the key is sound and why this
-                                # stays loop-local rather than a memo on the store (ES-12).
-                                waited_fold = self._fold_if_tail_moved(waited_fold)
-                                waiting = waited_fold[1]
-                                live = waiting.nodes.get(node.id)
-                                if self._skip_if_aborted(a, waiting):
-                                    skip_eval = True
-                                    break
-                                lifecycle_current = _eval_admission_current(
-                                    waiting, live, generation, max_es)
-                                if not lifecycle_current:
-                                    if live is not None and live.id in waiting.aborted_nodes:
-                                        self._skip_if_aborted(a, waiting)
-                                    skip_eval = True
-                                    break
-                                cur, node = waiting, live
-                                reservation = await self._wait_reserve_node_resources(
-                                    node,
-                                    resource_pin=self._card_resource_pin_for_node(cur, node),
-                                    wait_once=True,
-                                )
-                                if reservation is None:
-                                    continue
-                                # The ceiling may have fired during the `await` that just granted
-                                # these devices. Hand them back and start nothing: the eval would
-                                # spend GPU on a run that is over and raise from inside itself.
-                                if budget_stop_recheck(budget_stop):
-                                    self._release_gpus(reservation.get("gpu_ids"))
-                                    reservation = None
-                                    skip_eval = True
-                                    break
-                                # The admission re-check reads the log through the SAME gate
-                                # (EVT-04): everything it refuses on — abort, drop, reset, tombstone,
-                                # pause/stop/finish, a spent budget, a re-pin — lands by APPEND, so an
-                                # unmoved tail is the fold the tick just took. It used to re-fold
-                                # unconditionally, 60 identical prefixes in a 60-node toy run.
-                                waited_fold = self._fold_if_tail_moved(waited_fold)
-                                admitted = waited_fold[1]
-                                live = admitted.nodes.get(node.id)
-                                if self._skip_if_aborted(a, admitted):
-                                    self._release_gpus(reservation.get("gpu_ids"))
-                                    reservation = None
-                                    skip_eval = True
-                                    break
-                                if not _eval_admission_current(
-                                        admitted, live, generation, max_es):
-                                    self._release_gpus(reservation.get("gpu_ids"))
-                                    reservation = None
-                                    if live is not None and live.id in admitted.aborted_nodes:
-                                        self._skip_if_aborted(a, admitted)
-                                    skip_eval = True
-                                    break
-                                if not self._node_resource_reservation_is_current(
-                                    admitted, live, reservation,
-                                ):
-                                    self._release_gpus(reservation.get("gpu_ids"))
-                                    cur, node = admitted, live
-                                    continue
-                                node = live
-                                self._register_eval_resource_reservation(
-                                    node.id, generation, reservation)
-                                break
-                        if skip_eval:
-                            continue
-                        # …and the TIME this lane will charge, committed against the run allowance
-                        # for exactly as long as the lane holds it. Reserved beside the devices and
-                        # released in the same `finally`, so no path can leak an allowance nobody is
-                        # spending (`resources.py::eval_time_admission_blocked`).
-                        _reserve_eval_time(self, a["node_id"], generation, node)
-                        try:
-                            # ADMIT's fold IS this one while the tail stays put (review 2026-09-22,
-                            # EVT-04): it re-folded the identical prefix for every evaluation, 60 of
-                            # 60 in a 60-node toy run. The state is given up here — nothing below
-                            # reads it, and the next iteration folds afresh — see
-                            # `evaluate.py::handed_admission_fold` for why that is not a shared memo.
-                            with handed_admission_fold(a["node_id"], *waited_fold):
-                                await self._evaluate(a["node_id"], limiter, max_es)
-                        finally:
-                            _release_eval_time(self, a["node_id"], generation)
-                            if reservation is not None and generation is not None:
-                                self._settle_eval_resource_reservation(a["node_id"], generation, reservation)
-                else:
-                    # G3 distributed/parallel eval: CONTINUOUS dispatch. A pool of `max_parallel` slots
-                    # is kept FULL — the instant any eval finishes and the dispatcher worker returns
-                    # its lifecycle reservation to `_free_gpus`, the producer admits the NEXT
-                    # queued eval into that slot. This closes the head-of-line gap the old
-                    # `started >= max_parallel: break` left: that break capped the batch at max_parallel
-                    # STARTED and deferred the rest to a FUTURE spine iteration, so a short eval that
-                    # freed its GPU left it idle for the whole remaining life of a long sibling (the
-                    # 10h-vs-1h case). The semaphore bounds concurrency to max_parallel AND refills a
-                    # freed slot; each eval gets its own no-op CapacityLimiter(1) so `_evaluate`'s
-                    # internal `async with limiter` is inert and the semaphore is the SOLE bound.
-                    # fast_acquire: when a slot is already free the admit takes no checkpoint, so a batch
-                    # that fits in the pool behaves like the old tight loop (all started before any child
-                    # runs); the checkpoint only happens on the genuine refill wait.
-                    #
-                    # STILL A BARRIER: the inner task group joins the WHOLE batch before returning, so
-                    # `bg_tg`'s lifecycle is unchanged. It no longer says anything about a
-                    # "`pending_nodes()`-keyed guarantee", and that clause was stale from F1f: the
-                    # run-scoped eval group means a node stays `pending` across outer-loop turns this
-                    # barrier never sees, and since F1i the node-count cadences no longer key on that
-                    # predicate at all (`engine/cadence.py::at_creation_boundary`).
-                    # CAPTURE the width beside the semaphore. `anyio.Semaphore` cannot be resized, so
-                    # its token TOTAL is this batch's real concurrency for the batch's whole life —
-                    # while `self._eval_parallel` is live and has three writers that move it mid-batch
-                    # (the Strategist, an operator `budget_extend`, and since docs/29 F1 the
-                    # proposal-derived re-pin). The drained-pool test below asks "are all my tokens but
-                    # one free?", which is a question about THIS semaphore and must be asked of its own
-                    # total. Against the live attribute it broke in both directions: LOWERED mid-batch
-                    # (4 -> 2) the test fires with 3 siblings still holding GPUs, so a wide head is
-                    # declared unsatisfiable while the devices it wants are merely busy — and
-                    # `head_unsatisfiable` is sticky until the head changes, so it starves for the rest
-                    # of its queue lifetime, which is the exact defect `_HEAD_BYPASS_LIMIT` exists to
-                    # prevent. RAISED mid-batch (2 -> 4) the test needs `slots.value >= 3` from a
-                    # semaphore whose maximum is 2, so it can never fire and a genuinely unsatisfiable
-                    # head wedges the batch on `_wait_for_gpu_change` with nothing running to move the
-                    # epoch. `_settle_proposal_width` only re-pins between batches, so this is defence
-                    # in depth for that writer — but it is the ONLY thing holding the line for the
-                    # other two, which have always been able to fire mid-batch.
-                    batch_width = max(1, int(self._eval_parallel))
-                    slots = anyio.Semaphore(batch_width, fast_acquire=True)
-
-                    async def _eval_in_slot(nid: int, generation: Optional[int],
-                                            reservation: Optional[dict]) -> None:
-                        try:
-                            # A private single-token limiter -> `_evaluate`'s `async with limiter` is a
-                            # no-op; the outer semaphore is what bounds fan-out and drives the refill.
-                            await self._evaluate(nid, anyio.CapacityLimiter(1), max_es)
-                        except BaseException as exc:  # noqa: BLE001 — re-raised unless a run stop
-                            # A SPEND CEILING THIS EVALUATION CROSSED is deferred into the same sink
-                            # the overlapped research uses (review 2026-09-22, ENG2-02), never raised
-                            # into `tg`, where it cancelled every sibling lane mid-score. The refill
-                            # gate below then admits nothing more, and the method re-raises the stop
-                            # once the batch has joined. See `core/errors.py::deferrable_budget_stop`.
-                            # A refused run setup (ENG2-08) rides the same sink, so a batch whose
-                            # lanes all stopped on it ends the run on ONE refusal, not a group.
-                            stop = deferrable_run_stop(exc)
-                            if stop is None:
-                                raise
-                            budget_stop.append(stop)
-                        finally:
-                            # The eval-second allowance this lane committed at admission goes back
-                            # BEFORE the slot does: the producer wakes on `slots.release()` and
-                            # immediately asks whether one more lane fits, and it must ask that with
-                            # this lane's worst case already handed back — its REAL cost is in the log
-                            # by now and `total_eval_seconds` charges it.
-                            _release_eval_time(self, nid, generation)
-                            if reservation is not None and generation is not None:
-                                self._settle_eval_resource_reservation(nid, generation, reservation)
-                            slots.release()          # free the slot -> wakes the producer to admit next
-
-                    async with anyio.create_task_group() as tg:
-                        pending = list(evals)
-                        # Bounded aging state for the scan below (see _HEAD_BYPASS_LIMIT).
-                        head_id: Optional[int] = None
-                        head_bypasses = 0
-                        head_unsatisfiable = False
-                        while pending:
-                            # Fresh fold PER ADMISSION (like the serial branch, unlike the old fold-once):
-                            # continuous dispatch means earlier evals in THIS batch complete mid-loop, so
-                            # the abort-skip and the eval-budget guard both act on LIVE state — strictly
-                            # stricter than the dead fold-once check the old comment flagged.
-                            cur = fold(self.store.read_all())
-                            # Budget guard (parallel path): now that `cur` reflects mid-batch completions,
-                            # this actually enforces the eval-second cap — admit no more once spent. The
-                            # overshoot is bounded to the ONE evaluation the ceiling has always allowed,
-                            # not to the ~max_parallel that could each enter under the same remaining
-                            # balance: the annotation this line used to carry — "a 'hard cumulative'
-                            # budget cannot count only completed charges: every lane can enter under the
-                            # same remaining balance and each timeout may exceed it. Reserve the
-                            # worst-case/time-bounded charge atomically at admission, then release the
-                            # unused portion when the evaluation settles." — is what
-                            # `resources.py::eval_time_admission_blocked` and the reservation below now
-                            # do. The first lane still enters on the completed-time rule alone (see that
-                            # function's second clause: an empty ledger may never refuse, or a ceiling
-                            # under one eval's timeout would admit nothing at all).
-                            if _eval_time_admission_refused(self, cur, None, max_es):
-                                break
-                            await slots.acquire()     # blocks only when the pool is full -> the refill point
-                            # the pre-check above may be minutes old after a genuine refill
-                            # wait. Re-fold while owning the freed slot so a sibling that crossed the hard
-                            # eval budget (or an operator abort) cannot be followed by one more admission.
-                            cur = fold(self.store.read_all())
-                            if _eval_time_admission_refused(self, cur, None, max_es):
-                                slots.release()
-                                break
-                            # …and the SPEND ceiling, for the same reason.  THE ONLY gate this
-                            # branch needs, and deliberately not a second one at the top of the
-                            # producer loop: `slots.acquire()` sits unconditionally between that top
-                            # and the scan below, so EVERY route to an admission — a fresh turn, a
-                            # `continue` after an unsatisfiable head, a genuine refill wait — passes
-                            # through here.  A top-of-loop copy would be unreachable-first and
-                            # therefore untestable, which is how a gate rots.  It is also the place
-                            # the stop actually lands: the refill wait is where this loop spends
-                            # nearly all of its time, and the overlapped research crosses the ceiling
-                            # while a sibling is mid-eval.
-                            if budget_stop:
-                                slots.release()
-                                break
-                            # Scan for the first candidate whose complete footprint fits *now*.  A
-                            # GPU-heavy head may wait while an explicit CPU node (gpus=0) behind it
-                            # starts; reservation and release both use the condition-protected pool.
-                            epoch = (self._gpu_pool_epoch()
-                                     if hasattr(self, "_gpu_pool_epoch") else 0)
-                            chosen_index = None
-                            chosen_node = None
-                            chosen_reservation = None
-                            kept = []
-                            for a in pending:
-                                if self._skip_if_aborted(a, cur):
-                                    continue
-                                kept.append(a)
-                            pending = kept
-                            # BOUNDED AGING. First-fit is work-conserving and right almost always — an
-                            # explicit CPU node behind a GPU-heavy head should start — but a steady
-                            # stream of small jobs consumes every PARTIAL release, so a wide head can
-                            # wait forever for all of its GPUs to be free at the same instant. Once the
-                            # head has been passed over `_HEAD_BYPASS_LIMIT` times in a row, scan ONLY
-                            # the head: releases then accumulate toward it instead of being eaten. The
-                            # claim is dropped below if the pool drains completely and it still does not
-                            # fit, so an impossible request waits its turn instead of wedging the batch.
-                            current_head = pending[0]["node_id"] if pending else None
-                            if current_head != head_id:
-                                head_id, head_bypasses, head_unsatisfiable = current_head, 0, False
-                            scan = pending
-                            if head_bypasses >= _HEAD_BYPASS_LIMIT and not head_unsatisfiable:
-                                scan = pending[:1]
-                            for pos, a in enumerate(scan):
-                                node = cur.nodes.get(a["node_id"])
-                                if node is None or not hasattr(self, "_try_reserve_node_resources"):
+                        # …and the SPEND ceiling, for the same reason.  THE ONLY gate this
+                        # branch needs, and deliberately not a second one at the top of the
+                        # producer loop: `slots.acquire()` sits unconditionally between that top
+                        # and the scan below, so EVERY route to an admission — a fresh turn, a
+                        # `continue` after an unsatisfiable head, a genuine refill wait — passes
+                        # through here.  A top-of-loop copy would be unreachable-first and
+                        # therefore untestable, which is how a gate rots.  It is also the place
+                        # the stop actually lands: the refill wait is where this loop spends
+                        # nearly all of its time, and the overlapped research crosses the ceiling
+                        # while a sibling is mid-eval.
+                        if budget_stop:
+                            slots.release()
+                            break
+                        # Scan for the first candidate whose complete footprint fits *now*.  A
+                        # GPU-heavy head may wait while an explicit CPU node (gpus=0) behind it
+                        # starts; reservation and release both use the condition-protected pool.
+                        epoch = (self._gpu_pool_epoch()
+                                 if hasattr(self, "_gpu_pool_epoch") else 0)
+                        chosen_index = None
+                        chosen_node = None
+                        chosen_reservation = None
+                        kept = []
+                        for a in pending:
+                            if self._skip_if_aborted(a, cur):
+                                continue
+                            kept.append(a)
+                        pending = kept
+                        # BOUNDED AGING. First-fit is work-conserving and right almost always — an
+                        # explicit CPU node behind a GPU-heavy head should start — but a steady
+                        # stream of small jobs consumes every PARTIAL release, so a wide head can
+                        # wait forever for all of its GPUs to be free at the same instant. Once the
+                        # head has been passed over `_HEAD_BYPASS_LIMIT` times in a row, scan ONLY
+                        # the head: releases then accumulate toward it instead of being eaten. The
+                        # claim is dropped below if the pool drains completely and it still does not
+                        # fit, so an impossible request waits its turn instead of wedging the batch.
+                        current_head = pending[0]["node_id"] if pending else None
+                        if current_head != head_id:
+                            head_id, head_bypasses, head_unsatisfiable = current_head, 0, False
+                        scan = pending
+                        if head_bypasses >= _HEAD_BYPASS_LIMIT and not head_unsatisfiable:
+                            scan = pending[:1]
+                        waited_resources = False
+                        resource_stop = False
+                        for pos, a in enumerate(scan):
+                            node = cur.nodes.get(a["node_id"])
+                            if node is not None:
+                                from looplab.engine.shared import launch_evaluator_error
+                                if launch_evaluator_error(self, node, cur) is not None:
                                     chosen_index = pos
                                     chosen_node = node
                                     break
-                                candidate = self._try_reserve_node_resources(
-                                    node,
-                                    resource_pin=self._card_resource_pin_for_node(cur, node),
-                                )
-                                if candidate is not None:
-                                    chosen_index = pos
-                                    chosen_node = node
-                                    chosen_reservation = candidate
+                            if node is None or not (hasattr(self, "_try_reserve_node_resources")
+                                    or (batch_width == 1 and hasattr(self, "_wait_reserve_node_resources"))):
+                                chosen_index = pos
+                                chosen_node = node
+                                break
+                            pin = self._card_resource_pin_for_node(cur, node)
+                            if batch_width == 1 and hasattr(self, "_wait_reserve_node_resources"):
+                                if budget_stop_recheck(budget_stop):
+                                    resource_stop = True
                                     break
-                            # A bypass is what ages the head; picking the head itself clears the debt.
-                            if chosen_index is not None:
-                                head_bypasses = head_bypasses + 1 if chosen_index > 0 else 0
-                            elif scan is not pending and slots.value >= batch_width - 1 \
-                                    and not track_gpus_held(self):
-                                # The pool was reserved for the head and drained to empty (this task
-                                # holds the only taken slot) and it STILL does not fit: it wants more
-                                # than the box has. Release the claim so the queue behind it can move.
-                                # Not while an operator's TRACK holds devices of the same pool
-                                # (`engine/track_lane.py::track_gpus_held`, review 2026-10-08): the
-                                # pool is then busy, not too small, and the sticky verdict would cost
-                                # the head its aging for the rest of its queue lifetime.
-                                head_unsatisfiable = True
-                            if chosen_index is None:
-                                slots.release()
-                                if not pending:
+                                # Preserve the single-lane bounded resource/footprint wait. Only the
+                                # sandbox slot, not the whole repair lifecycle, is serial now.
+                                candidate = await self._wait_reserve_node_resources(
+                                    node, resource_pin=pin, wait_once=True)
+                                waited_resources = True
+                                if budget_stop_recheck(budget_stop):
+                                    if candidate is not None:
+                                        self._release_gpus(candidate.get("gpu_ids"))
+                                    resource_stop = True
                                     break
-                                # A release between the scan and this wait changes the epoch, so the
-                                # condition returns immediately rather than losing the wake-up.
+                            else:
+                                candidate = self._try_reserve_node_resources(node, resource_pin=pin)
+                            if candidate is not None:
+                                chosen_index = pos
+                                chosen_node = node
+                                chosen_reservation = candidate
+                                break
+                        if resource_stop:
+                            slots.release()
+                            break
+                        # A bypass is what ages the head; picking the head itself clears the debt.
+                        if chosen_index is not None:
+                            head_bypasses = head_bypasses + 1 if chosen_index > 0 else 0
+                        elif scan is not pending and slots.value >= batch_width - 1 \
+                                and not track_gpus_held(self):
+                            # The pool was reserved for the head and drained to empty (this task
+                            # holds the only taken slot) and it STILL does not fit: it wants more
+                            # than the box has. Release the claim so the queue behind it can move.
+                            # Not while an operator's TRACK holds devices of the same pool
+                            # (`engine/track_lane.py::track_gpus_held`, review 2026-10-08): the
+                            # pool is then busy, not too small, and the sticky verdict would cost
+                            # the head its aging for the rest of its queue lifetime.
+                            head_unsatisfiable = True
+                        if chosen_index is None:
+                            # Still owned by this producer, not shared with an evaluation child.
+                            waiting_snapshot = waited_fold if callable(tail_reader) else None
+                            slots.release()
+                            if not pending:
+                                break
+                            # A width-one scan already waited a bounded condition tick and must
+                            # re-fold now. Wider scans wait once after scanning all footprints.
+                            if not waited_resources:
                                 await anyio.to_thread.run_sync(
                                     self._wait_for_gpu_change, epoch, abandon_on_cancel=True)
-                                continue
-                            if chosen_node is not None and chosen_reservation is not None:
+                            continue
+                        if chosen_node is not None and chosen_reservation is not None:
+                            if callable(tail_reader):
+                                waited_fold = tail_reader(waited_fold)
+                                admitted = waited_fold[1]
+                            else:
                                 admitted = fold(self.store.read_all())
-                                live = admitted.nodes.get(chosen_node.id)
-                                if self._skip_if_aborted(pending[chosen_index], admitted):
-                                    self._release_gpus(chosen_reservation.get("gpu_ids"))
-                                    pending.pop(chosen_index)
-                                    slots.release()
-                                    continue
-                                terminal_gate = _run_terminal_gate(admitted)
-                                lifecycle_current = _eval_admission_current(
-                                    admitted, live, chosen_node.attempt, max_es)
-                                if (
-                                    not lifecycle_current
-                                    or not self._node_resource_reservation_is_current(
-                                        admitted, live, chosen_reservation,
-                                    )
-                                ):
-                                    self._release_gpus(chosen_reservation.get("gpu_ids"))
-                                    if terminal_gate:
-                                        # A pause/stop can land during the bounded resource wait.  The
-                                        # reservation was formed from the old turn, so release it and end
-                                        # admission instead of spinning or scheduling work past the gate.
-                                        slots.release()
-                                        break
-                                    if not lifecycle_current:
-                                        pending.pop(chosen_index)
-                                    slots.release()
-                                    continue
-                                chosen_node = live
-                            chosen = pending.pop(chosen_index)
-                            generation = (chosen_node.attempt if chosen_node is not None else None)
-                            if chosen_reservation is not None and generation is not None:
-                                self._register_eval_resource_reservation(
-                                    chosen["node_id"], generation, chosen_reservation)
-                            # THE TIME RESERVATION IS TAKEN HERE, before the lane starts and while
-                            # the producer still owns the decision — the whole point is that the NEXT
-                            # turn of this loop sees it. Its release is `_eval_in_slot`'s `finally`,
-                            # which the failed-spawn path below cannot rely on (nothing ran), so that
-                            # path releases it beside the devices.
-                            _reserve_eval_time(self, chosen["node_id"], generation, chosen_node)
-                            try:
-                                tg.start_soon(_eval_in_slot, chosen["node_id"], generation,
-                                              chosen_reservation)
-                            except BaseException:
-                                _release_eval_time(self, chosen["node_id"], generation)
-                                if chosen_reservation is not None and generation is not None:
-                                    self._clear_eval_resource_reservation(
-                                        chosen["node_id"], generation)
-                                    self._release_gpus(chosen_reservation.get("gpu_ids"))
+                            live = admitted.nodes.get(chosen_node.id)
+                            if self._skip_if_aborted(pending[chosen_index], admitted):
+                                self._release_gpus(chosen_reservation.get("gpu_ids"))
+                                pending.pop(chosen_index)
                                 slots.release()
-                                raise
+                                continue
+                            terminal_gate = _run_terminal_gate(admitted)
+                            lifecycle_current = _eval_admission_current(
+                                admitted, live, chosen_node.attempt, max_es)
+                            if (
+                                not lifecycle_current
+                                or not self._node_resource_reservation_is_current(
+                                    admitted, live, chosen_reservation,
+                                )
+                            ):
+                                self._release_gpus(chosen_reservation.get("gpu_ids"))
+                                if terminal_gate:
+                                    # A pause/stop can land during the bounded resource wait.  The
+                                    # reservation was formed from the old turn, so release it and end
+                                    # admission instead of spinning or scheduling work past the gate.
+                                    slots.release()
+                                    break
+                                if not lifecycle_current:
+                                    pending.pop(chosen_index)
+                                slots.release()
+                                continue
+                            chosen_node = live
+                        waiting_snapshot = None  # MOVE the snapshot into this one child below
+                        chosen = pending.pop(chosen_index)
+                        generation = (chosen_node.attempt if chosen_node is not None else None)
+                        if chosen_reservation is not None and generation is not None:
+                            self._register_eval_resource_reservation(
+                                chosen["node_id"], generation, chosen_reservation)
+                        # THE TIME RESERVATION IS TAKEN HERE, before the lane starts and while
+                        # the producer still owns the decision — the whole point is that the NEXT
+                        # turn of this loop sees it. Its release is `_eval_in_slot`'s `finally`,
+                        # which the failed-spawn path below cannot rely on (nothing ran), so that
+                        # path releases it beside the devices.
+                        _reserve_eval_time(self, chosen["node_id"], generation, chosen_node)
+                        try:
+                            tg.start_soon(_eval_in_slot, chosen["node_id"], generation,
+                                          chosen_reservation, waited_fold if callable(tail_reader) else None)
+                        except BaseException:
+                            _release_eval_time(self, chosen["node_id"], generation)
+                            if chosen_reservation is not None and generation is not None:
+                                self._clear_eval_resource_reservation(
+                                    chosen["node_id"], generation)
+                                self._release_gpus(chosen_reservation.get("gpu_ids"))
+                            slots.release()
+                            raise
             finally:
                 # Evals have joined (or errored out) — stop the repeating research loop. One-shot
                 # research (repeat off) leaves `bg_tg` uncancelled so its single memo still records,

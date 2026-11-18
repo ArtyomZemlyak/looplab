@@ -38,6 +38,7 @@ from _source_scan import PKG, called_names, iter_trees  # noqa: E402
 
 REFRESH = boss_router._REPORT_REFRESH_LEDGER
 LENS = concept_lens_service.CONCEPT_LENS_LEDGER
+from looplab.serve.report_review import LEDGER as REVIEW
 
 ID_A = "a" * 64
 DIGEST_A = "1" * 64
@@ -179,7 +180,7 @@ def test_the_generation_fence_hides_another_generations_rows_from_both_policies(
         _lens_rows("concept_lens_completed", other),
     ])
 
-    for spec in (REFRESH, LENS):
+    for spec in (REFRESH, LENS, REVIEW):
         view = fold_paid_ledger(spec, events, gen)
         assert (view.claims, view.terminals, view.unresolved, view.conflicts) == ({}, {}, set(), set())
 
@@ -354,7 +355,7 @@ def test_the_paid_ledger_allow_list_covers_exactly_the_shipped_specs_and_is_regi
     """The two-way registry check: nothing in the allow-list is unused, and no shipped spec names a
     type the allow-list does not carry — so a third paid route must extend it deliberately."""
     declared = set()
-    for spec in (REFRESH, LENS):
+    for spec in (REFRESH, LENS, REVIEW):
         declared.add(spec.claim_type)
         declared |= set(spec.terminal_types)
     assert declared == set(SERVE_PAID_LEDGER_EVENTS)

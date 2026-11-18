@@ -34,6 +34,12 @@ success.
   merely because no disposition was recorded.
 - Bounded reads preserve omissions and continuation links; a new agent can resume without the full history.
 - Engineering-only work may skip literature and a separate scientific question without a warning storm.
+- Published source, a local unpublished fix, the deployed runtime and an accepted end-to-end result are
+  separate facts. In particular, exercise job-role materialization and historical unknown roles on the actual
+  tested revision; a green isolated test cannot certify production deployment.
+- A deliberately unregistered upload arm refuses without deleting genuine outputs or changing the
+  preregistration automatically. Metadata preflight is a separate capability under its own acceptance
+  protocol; this graph check is not a second declaration of that item.
 
 ## Acceptance
 

@@ -34,6 +34,10 @@ the same change and say why in the commit:
 Regenerations so far, each one an ADDITIVE model field (the case the paragraph above names), with
 the diff that justified it:
 
+* 2026-11-12 — `metric_behavior_scans` + the earlier `operator_direction_ledger` default.
+  Every existing root/nested value compared equal before refresh; only two empty maps were added,
+  with the prior key order preserved. No original event log or recorded result changed.
+
 * 2026-10-14 — `Node.protocol_version` (doc 81 §8: the campaign protocol version a node was
   created under, from `node_created.protocol_version`). 8 insertions, 0 deletions — `null` per
   node, what a row without the key folds to.

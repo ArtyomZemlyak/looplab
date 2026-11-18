@@ -1135,7 +1135,8 @@ def redacted_skill_body(body: str) -> str:
 
 def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                      fingerprint: list[str], task_id: str, *, identity_claim: Optional[str] = None,
-                     classifier_version: str = "", source_statement: str = "") -> Optional[Path]:
+                     classifier_version: str = "", source_statement: str = "",
+                     external_source_sha256: str = "") -> Optional[Path]:
     """Draft/refresh an auto-distilled skill. New claim -> status: candidate. If a candidate
     with the same full normalized-claim identity exists from a DIFFERENT task fingerprint
     (Jaccard < 0.6), the technique generalized -> status: promoted. Never raises (best-effort
@@ -1196,6 +1197,7 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
             # fingerprint is matched on (`_skill_contradiction`), bounded like the families.
             tasks = [str(task_id)]
             carried: dict[str, str] = {}
+            external_sources = []
             if p.exists():
                 head = p.read_text(encoding="utf-8")
                 # Read lifecycle state only from the real leading frontmatter.  The skill body is
@@ -1225,10 +1227,24 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                     status = next_auto_skill_status(prior_status, different)
                     carried = {key: metadata[key] for key in
                                ("demotions", "demoted_by", "demoted_outcome") if metadata.get(key)}
+                    try:
+                        prior_sources = json.loads(metadata.get("external_source_sha256", "[]"))
+                        if (isinstance(prior_sources, list) and len(prior_sources) <= 6
+                                and all(isinstance(x, str) and re.fullmatch(r"[0-9a-f]{64}", x)
+                                        for x in prior_sources)):
+                            external_sources = prior_sources
+                    except (ValueError, TypeError):
+                        pass
                     if fingerprint not in fps:
                         fps = (fps + [fingerprint])[-6:]
                     if str(task_id) not in tasks:
                         tasks = (tasks + [str(task_id)])[-_SKILL_TASKS_KEPT:]
+            if external_source_sha256:
+                if not re.fullmatch(r"[0-9a-f]{64}", external_source_sha256):
+                    return None
+                external_sources = list(dict.fromkeys([*external_sources, external_source_sha256]))[-6:]
+            source_metadata = (f"external_source_sha256: {_one_line_json(external_sources)}\n"
+                               if external_sources else "")
             source_task = _one_line_json(str(task_id))
             classifier = (str(classifier_version).strip()
                           if re.fullmatch(r"[a-zA-Z0-9._/-]{1,80}", str(classifier_version or ""))
@@ -1246,7 +1262,7 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                     "provenance: auto\n"
                     f"status: {status}\n"
                     f"claim_sha256: {claim_digest}\n"
-                    f"{classifier_metadata}"
+                    f"{classifier_metadata}{source_metadata}"
                     # ``task_id`` is operator-authored.  A raw newline here could inject a later
                     # ``status``/``provenance`` field into the trust-bearing frontmatter (whose
                     # duplicate-key compatibility rule is last-one-wins).  JSON keeps it on one

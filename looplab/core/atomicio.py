@@ -648,13 +648,15 @@ def strict_atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
     # `serve/`). A durability helper describing itself as unused misleads exactly the reviewer the
     # note was written for, so that point is dropped rather than corrected in place.
     #
-    # OPEN[atomicio-windows-parent-publication] unreachable from this repo's POSIX CI, so the
-    # proof can only name the site that owns it. proof:present:_ensure_strict_parent@looplab/core/atomicio.py
+    # OPEN[atomicio-windows-parent-publication] not exercised by this POSIX audit. Windows CI
+    # exists, but the affected fix/acceptance has not shipped; the proof names its owning site.
+    # proof:present:_ensure_strict_parent@looplab/core/atomicio.py
     # STILL OPEN: Windows parent-dir publication (_ensure_strict_parent -> _strict_publish_directory,
     # replace=False) makes two racing writers of the SAME missing parent fail one of them with
     # ERROR_ALREADY_EXISTS, where POSIX mkdir(exist_ok=True) tolerates the identical race; and a
     # crash between mkdtemp and the move leaves a permanent '.{name}.{rand}.tmp' directory no sweeper
-    # removes. Both are Windows-only and neither is reachable from the POSIX CI this repo runs.
+    # removes. Both are Windows-only and cannot be verified by this POSIX audit. The repository's
+    # Windows workflow is not, by itself, evidence these specific cases passed (rechecked 2026-11-10).
     #
     # NARROWED 2026-09-08 — both halves are now WRITTEN and deliberately NOT shipped. Commit 6060f23e
     # (reverted by the commit after it) has them, with four Windows-skipped cases at the end of

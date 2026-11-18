@@ -129,7 +129,8 @@ class RunControlTools:
                  mutation_journal_path=None, mutation_recovery: bool = False,
                  lifecycle: "Optional[RunLifecycleFns]" = None,
                  trace_rewrite: "Optional[TraceRewriteFns]" = None,
-                 allow_inject: bool = False, allow_tracks: bool = False):
+                 allow_inject: bool = False, allow_tracks: bool = False,
+                 report_review_reader=None, report_nomination_reader=None):
         self.run_root = Path(run_root)
         # `inject_experiment` (doc 73 §1.4): OFF at this constructor, as a tool the model may call
         # is a prompt; the Assistant wires `Settings.assistant_inject_tool`.
@@ -138,6 +139,11 @@ class RunControlTools:
         # engine (`engine/track_lane.py`). OFF here for the same reason; the Assistant wires
         # `Settings.assistant_track_tool`.
         self.allow_tracks = bool(allow_tracks)
+        # Serving-owned paid receipt readers are injected; tools must not import serve upward.
+        # Reuse the existing assistant_inject_tool exposure. This tool records a nomination only:
+        # unlike inject_experiment it neither builds nor executes a candidate.
+        self._report_review_reader = report_review_reader
+        self._report_nomination_reader = report_nomination_reader
         self.alive_fn = alive_fn
         self.mode = mode
         self.approver = approver
@@ -293,7 +299,17 @@ class RunControlTools:
                  "track": {"type": "string", "description": "a name under the task's eval.tracks"},
                  "node_ids": {"type": "array", "items": {"type": "integer"},
                               "description": "the nodes to measure; omit for every evaluated node"}},
-                ["run_id", "track"])] if self.allow_tracks else [])
+                ["run_id", "track"])] if self.allow_tracks else []) + ([
+            fn_spec("read_report_review", "Read the original optional independent report review, exact "
+                "native citations and current/stale status; no paid call or execution.",
+                {"run_id": {"type": "string"}}, ["run_id"]),
+            fn_spec("nominate_report_review", "Present one saved review nomination for explicit operator "
+                "approval, then record it as a retractable research direction. Does not launch, grant "
+                "or schedule a confirmation, fit, evaluation or ablation.",
+                {"run_id": {"type": "string"}, "review_seq": {"type": "integer"},
+                 "nomination_id": {"type": "string"}}, ["run_id", "review_seq", "nomination_id"])
+        ] if self.allow_inject and callable(self._report_review_reader)
+            and callable(self._report_nomination_reader) else [])
 
     # ------------------------------------------------------------------ helpers
     def _rd(self, run_id) -> Optional[Path]:
@@ -418,6 +434,11 @@ class RunControlTools:
                 return self._tool_inject_experiment(name, rid, rd, args)
             if name == "evaluate_track" and self.allow_tracks:
                 return self._tool_evaluate_track(name, rid, rd, args)
+            if self.allow_inject and callable(self._report_review_reader) and callable(self._report_nomination_reader):
+                if name == "read_report_review":
+                    return json.dumps(self._report_review_reader(rd), ensure_ascii=False)
+                if name == "nominate_report_review":
+                    return self._nominate_report_review(name, rid, rd, args)
             if name == "delete_node":
                 return self._delete_node(rid, rd, args)
             if name == "delete_run":
@@ -427,6 +448,32 @@ class RunControlTools:
         except Exception as e:  # noqa: BLE001 — a tool error must never crash the loop
             return f"(tool error in {name}: {e})"
         return f"(unknown tool: {name})"
+
+    def _nominate_report_review(self, name, rid, rd, args):
+        from looplab.events.types import EV_HINT
+        if self._mutation_fence is not None and self._mutation_fence.recovering:
+            key, generation, intent = self._mutation_fence.claim_recovery(name, rid)
+            data = intent.get('data', {})
+            proof = data.get('review_nomination', {})
+            if (intent.get('event_type') != EV_HINT or proof.get('review_seq') != args.get('review_seq')
+                    or proof.get('nomination_id') != args.get('nomination_id')):
+                raise _MutationRecoveryBlocked('report_nomination_recovery_changed',
+                    'The saved approved nomination differs from this recovery request.')
+        else:
+            data = self._report_nomination_reader(rd, args.get('review_seq'), args.get('nomination_id'))
+            blocked, formed_generation = self._gate(name, rid, rd,
+                'record an advisory report-review research nomination',
+                scope={'run_id': rid, **data['review_nomination']},
+                preview=data['text'] + '\n\nNo evaluation or model work is scheduled by approval.')
+            if blocked:
+                return blocked
+            with self._mutation_intent(name, rid, rd, {'event_type': EV_HINT, 'data': data},
+                    command_backed=True, expected_generation=formed_generation) as staged:
+                key, generation = staged
+        record = self._commands.submit(rd, EV_HINT, data, idempotency_key=key,
+            expected_generation=generation)
+        return _render_command_result(record, name=name, run_id=rid,
+            completed='advisory research nomination recorded; no experiment launched')
 
     def _recover_delete_run(self, rid: str) -> str:
         if not self._commands.durable_deletion_available or self._mutation_fence is None:

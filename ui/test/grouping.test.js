@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import { layoutWithGroups, similarityRank } from '../src/util.js'
 import {
   computeGroups, nodeGroupMap, autoCollapseSet, groupAggregate, isMergeEntryEdge, themeFilteredGroupAggregate,
+  rerouteForCollapse,
 } from '../src/grouping.js'
 
 const NODE_W = 188, NODE_H = 84
@@ -287,4 +288,16 @@ test('collapsed concept selection and lifecycle exclusions share one exact aggre
   assert.equal(none.filterActive, true)
   assert.equal(none.matchedCount, 0)
   assert.equal(none.best, null)
+})
+
+test('artifact uses are visible but remain distinct from scientific parent edges', () => {
+  const nodes = mk([{ id: 1 }, { id: 2, parents: [1] }, { id: 3 }])
+  nodes[3].uses = [1, 2]
+  const routed = rerouteForCollapse(nodes, new Set(), new Map())
+  assert.deepEqual(routed.edges.filter(edge => edge.relation === 'uses').map(edge => [edge.srcId, edge.dstId]), [[1, 3], [2, 3]])
+  assert.equal(routed.edges.filter(edge => edge.srcId === 1 && edge.dstId === 2)[0].relation, undefined)
+  nodes[3].parent_ids = [1]
+  const both = rerouteForCollapse(nodes, new Set(), new Map())
+  assert.equal(both.edges.filter(edge => edge.srcId === 1 && edge.dstId === 3).length, 1)
+  assert.equal(both.edges.filter(edge => edge.srcId === 1 && edge.dstId === 3)[0].relation, undefined)
 })

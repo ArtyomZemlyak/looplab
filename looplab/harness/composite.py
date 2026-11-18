@@ -81,9 +81,16 @@ class _Steps:
             message = (f"stopped at {failed['step']}: the command was rejected — read its error, "
                        "fix the cause and call again with a NEW key (completed steps under the old "
                        "key stay recorded)")
+        elif failed is not None and isinstance(failed.get("detail"), str) and (
+                "action_id was reused with different content" in failed["detail"]):
+            message = (f"stopped at {failed['step']}: this key already accepted a different payload; "
+                       "restore the EXACT original payload for completed steps, including notes and "
+                       "reason. Only a rejected later step may be corrected in this same-key resume. "
+                       "Read the accepted receipt before submitting another action")
         elif failed is not None:
             message = (f"stopped at {failed['step']}: read its receipt; repeat this call with the "
-                       "SAME key to resume (completed steps replay their original receipts)")
+                       "SAME key to resume, preserving the EXACT payload of completed steps "
+                       "(including notes and reason); only rejected steps may be corrected")
         return {"ok": failed is None, "stopped_at": failed["step"] if failed else None,
                 "steps": self.steps, "message": message, **extra}
 
@@ -158,7 +165,8 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
                       parent_ids: Optional[list] = None,
                       parent_generations: Optional[dict] = None,
                       node_kind: Optional[str] = None, uses: Optional[list[int]] = None,
-                      pre_stages: Optional[list[dict]] = None, job_role: Optional[str] = None) -> dict:
+                      pre_stages: Optional[list[dict]] = None, job_role: Optional[str] = None,
+                      expected_evaluator_digest: Optional[str] = None) -> dict:
     """`code_from` (doc 79 §4) is the run-worktree / patch / foreign-branch alternative to
     `files`/`code`/`deleted` — exactly one of the two. It is PREVIEWED through the same route the
     intake converts it with (`POST .../code/overlay`, paths and sizes only) BEFORE anything is
@@ -181,11 +189,35 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
     from looplab.core.execution_scope import JOB_ROLES
     if job_role is not None and job_role not in JOB_ROLES:
         raise ConfigRefusal(f"job_role must be one of {', '.join(JOB_ROLES)}")
+    from looplab.core.evaluator_identity import (
+        evaluator_mismatch_detail, normalize_expected_evaluator_digest,
+    )
+    try:
+        expected_evaluator_digest = normalize_expected_evaluator_digest(expected_evaluator_digest)
+    except ValueError as exc:
+        raise ConfigRefusal(str(exc)) from None
     idea = dict(idea)
     progress = api.run_progress(run_id, expected_generation)
     if not steps.add("read_progress", progress):
         return steps.done(message="")
     body = progress["body"]
+    current_evaluator_digest = body.get("current_evaluator_digest")
+    evaluator_binding = "pinned" if expected_evaluator_digest is not None else "unpinned_legacy"
+    prior_inject = (
+        None if dry_run else api.command_receipt(run_id, expected_generation, idempotency_key=f"{key}:inject")
+    )
+    prior_record = (prior_inject.get("body") or {}).get("command") if prior_inject and _ok(prior_inject) else None
+    prior_status = prior_record.get("status") if isinstance(prior_record, dict) else None
+    if expected_evaluator_digest is not None:
+        replaying_accepted_inject = (
+            isinstance(prior_record, dict)
+            and prior_status not in (None, "rejected", "failed", "timed_out")
+        )
+        if not replaying_accepted_inject:
+            eval_mismatch = evaluator_mismatch_detail(expected_evaluator_digest, current_evaluator_digest)
+            if eval_mismatch is not None:
+                steps.steps.append({"step": "check_evaluator_digest", "ok": False, **eval_mismatch})
+                return steps.done(message=eval_mismatch["message"], dry_run=dry_run)
     required = dict(body.get("candidate_decisions_per_idea") or {})
     if node_kind == "artifact":
         required.pop("novelty", None)
@@ -228,10 +260,8 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
     if code_from is not None and not missing:
         # A same-key RESUME whose inject already landed must replay it, not re-judge a worktree
         # the agent has edited since (or a base that has moved): the preview is skipped then.
-        prior = (None if dry_run else
-                 api.command_receipt(run_id, expected_generation, idempotency_key=f"{key}:inject"))
-        record = (prior.get("body") or {}).get("command") if prior and _ok(prior) else None
-        status = record.get("status") if isinstance(record, dict) else None
+        record = prior_record
+        status = prior_status
         if status in ("rejected", "failed", "timed_out"):
             # Historical incident details omitted.
             return _settled_inject_refusal(steps, record, status)
@@ -251,7 +281,9 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
                 return steps.done(message="")
     if missing or dry_run:
         steps.steps.append({"step": "validate", "ok": not missing, "missing": missing,
-                            "blockers": blockers, "plan": plan})
+                            "blockers": blockers, "plan": plan,
+                            "evaluator_binding": evaluator_binding,
+                            "current_evaluator_digest": current_evaluator_digest})
         return steps.done(message=("dry run: nothing was written" if dry_run and not missing
                                    else "nothing was written"), dry_run=dry_run)
     if experiment is not None:
@@ -296,7 +328,8 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
                         ("parent_id", parent_id), ("parent_ids", parent_ids),
                         ("parent_generations", parent_generations), ("code_from", code_from),
                         ("node_kind", node_kind), ("uses", uses), ("pre_stages", pre_stages),
-                        ("job_role", job_role)):
+                        ("job_role", job_role),
+                        ("expected_evaluator_digest", expected_evaluator_digest)):
         if value is not None:
             data[name] = value
     result = _command(api, run_id, expected_generation, "inject_node", data, f"{key}:inject",
@@ -403,7 +436,8 @@ def stop_node(api, run_id: str, expected_generation: str, *, node_id: int, key: 
 
 
 def retry_node(api, run_id: str, expected_generation: str, *, node_id: int, key: str,
-               from_stage: str = "eval", generation: Optional[int] = None) -> dict:
+               from_stage: str = "eval", generation: Optional[int] = None,
+               resume_inputs: Optional[list[dict]] = None) -> dict:
     """Retry a node's setup/launch as a new ATTEMPT of the same node. The engine keeps the earlier
     attempt's terminal row and archives its stage logs (`attempt_logs/node_<id>/`, doc 78)."""
     steps = _Steps()
@@ -443,20 +477,71 @@ def retry_node(api, run_id: str, expected_generation: str, *, node_id: int, key:
             steps.steps.append({"step": "node_terminal", "ok": False,
                                 "message": f"node {node_id} is {status!r}; retry a terminal node"})
             return steps.done(message="")
-    result = _command(api, run_id, expected_generation, "node_reset", {
-        "node_id": int(node_id), "generation": int(generation), "from_stage": from_stage},
+    if resume_inputs is not None:
+        from looplab.core.retry_inputs import normalize_resume_inputs
+        try:
+            resume_inputs = normalize_resume_inputs(resume_inputs)
+        except ValueError as exc:
+            raise ConfigRefusal(str(exc)) from None
+    reset_payload: dict[str, Any] = {
+        "node_id": int(node_id), "generation": int(generation), "from_stage": from_stage,
+    }
+    if resume_inputs:
+        reset_payload["resume_inputs"] = resume_inputs
+    result = _command(api, run_id, expected_generation, "node_reset", reset_payload,
         step_key, settle_seconds=5.0)
     steps.add("reset", result)
     return steps.done(message=(f"node {node_id} queued for attempt {int(generation) + 1}; "
                                "earlier attempts stay in the event log and the attempt_logs/ archive"))
 
 
+def _per_query_preflight(api, run_id: str, metadata: dict) -> dict:
+    checked = api.request("POST", _run_path(run_id, "/per-query/preflight"), metadata, read_only=True)
+    if not _ok(checked):
+        return {**checked, "step": "metadata_preflight"}
+    body = checked.get("body")
+    # A transport may return HTTP 200 with an incomplete body. Never turn that into an unfenced
+    # binary upload (or call it a successful dry run). Old servers must be upgraded explicitly.
+    valid = isinstance(body, dict) and not checked.get("truncated")
+    if valid:
+        attempt = body.get("expected_attempt")
+        valid = (type(body.get("v")) is int and body["v"] == 1 and body.get("ok") is True
+                 and body.get("metadata_only") is True
+                 and isinstance(body.get("run_uid"), str) and bool(body["run_uid"])
+                 and body.get("generation") == metadata["expected_generation"].lower()
+                 and body.get("payload_validation") == "not_checked")
+        if body.get("mode") == "new_upload":
+            valid = (valid and body.get("metadata_validation") == "checked"
+                     and type(attempt) is int and attempt >= 0
+                     and type(body.get("node_id")) is int and body["node_id"] == metadata["node_id"]
+                     and type(body.get("node_terminal_seq")) is int
+                     and body["node_terminal_seq"] > 0)
+        elif body.get("mode") == "exact_replay_only":
+            valid = (valid and body.get("metadata_validation") == "prior_receipt_only"
+                     and isinstance(body.get("upload_id"), str) and bool(body["upload_id"])
+                     and (attempt is None or (type(attempt) is int and attempt >= 0)))
+        else:
+            valid = False
+    if not valid:
+        return {"status": 503, "code": "metadata_preflight_incomplete", "step": "metadata_preflight",
+                "message": "metadata preflight did not return a complete supported receipt"}
+    return checked
+
+
 def upload_per_query(api, run_id: str, expected_generation: str, *, node_id: int, path: str,
                      metrics: dict, action_id: str, test_label: Optional[str] = None,
                      experiment_id: Optional[str] = None, arm: Optional[str] = None,
                      query_key: str = "keys", cluster_key: Optional[str] = "users",
-                     measured_check: Optional[dict] = None) -> dict:
+                     measured_check: Optional[dict] = None, dry_run: bool = False) -> dict:
     source = Path(path).expanduser() if path else None
+    fmt = "json" if source is not None and source.suffix.lower() == ".json" else "npz"
+    metadata = {"expected_generation": expected_generation, "action_id": action_id,
+                "node_id": node_id, "format": fmt, "metrics": metrics,
+                "query_key": query_key, "cluster_key": cluster_key,
+                **{k: v for k, v in (("test_label", test_label), ("experiment_id", experiment_id),
+                                     ("arm", arm), ("measured_check", measured_check)) if v is not None}}
+    if dry_run:
+        return _per_query_preflight(api, run_id, metadata)
     if source is None or not source.is_file():
         # RESUME (doc 81 §8 leftover): the file is gone or was never passed again, but this client
         # spooled the exact request under (run_id, action_id) — resend that.
@@ -465,17 +550,16 @@ def upload_per_query(api, run_id: str, expected_generation: str, *, node_id: int
             return resumed
         raise ConfigRefusal("path must be a readable local file (and no spooled upload is pending "
                          "for this action_id)")
+    checked = _per_query_preflight(api, run_id, metadata)
+    if not _ok(checked):
+        return {**checked, "step": "metadata_preflight"}
+    attempt = (checked.get("body") or {}).get("expected_attempt")
+    if attempt is not None:
+        metadata["expected_attempt"] = attempt
     size = source.stat().st_size
     if size > MAX_UPLOAD_FILE_BYTES:
         raise ConfigRefusal(f"per-query files are at most {MAX_UPLOAD_FILE_BYTES} bytes")
-    fmt = "json" if source.suffix.lower() == ".json" else "npz"
-    body = {"expected_generation": expected_generation, "action_id": action_id,
-            "node_id": node_id, "format": fmt,
-            "content_b64": base64.b64encode(source.read_bytes()).decode("ascii"),
-            "metrics": metrics, "query_key": query_key, "cluster_key": cluster_key,
-            **{k: v for k, v in (("test_label", test_label), ("experiment_id", experiment_id),
-                                 ("arm", arm), ("measured_check", measured_check))
-               if v is not None}}
+    body = {**metadata, "content_b64": base64.b64encode(source.read_bytes()).decode("ascii")}
     return api.post_large(_run_path(run_id, "/per-query"), body, spool=(run_id, action_id),
                           source=str(source))
 

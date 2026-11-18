@@ -332,14 +332,15 @@ an open client. Between decisions the agent blocks on MCP `wait_for_next`; the o
 ### Check the live connection
 
 MCP `connection_check` is an explicit read. It takes the literal `run_id` and an
-optional `expected_generation` from the copied handoff. It reads `/state?observe_only=true`, then
+optional `expected_generation` from the copied handoff. It reads the small `/harness-identity`, then
 generation-fenced handoff and compact progress. If the supplied generation differs,
 it stops before reading the replacement run's context. Without it, the tool discovers
 the current generation; use that only when you intend to inspect the current run.
 Generation is a hexadecimal digest: `connection_check` accepts either hex case and
 uses its canonical lowercase spelling for subsequent fenced reads. This does not
 accept a different digest or reinterpret a run ID, key or action ID.
-The returned handoff must match the run ID, generation and external mode, with
+Identity version, exact UID, event sequence and source completeness are checked before larger reads.
+The returned handoff and progress must match the same UID as well as run ID, generation and external mode, with
 configured credential and valid server paths/engine observation. A malformed or
 mismatched handoff stops this check before progress is read.
 Both `run_progress` and `connection_check` validate critical compact progress fields:
@@ -830,8 +831,11 @@ The normal control cycle is:
    The journal stays unchanged. An exact retry remains a receipt of prior acceptance;
    if retarget occurs before an accepted abort is consumed, the engine vetoes that
    stop, records `asha_rank.stop_refusal`, and can open a fresh advisory question.
-   An opened observation holds the node terminal until answered. Inspect measured
-   metrics, stage logs and failures, then submit a corrected candidate if useful.
+   While compute runs, an opened live observation remains actionable. Once the evaluator returns,
+   unanswered monitor observations become `ended_before_decision`, with no answer or review verdict.
+   Their original evidence remains in progress/history; they do not hold execution terminal. Stage checks
+   and deadline-grace questions still require explicit answers. Inspect metrics, logs and failures before
+   choosing another candidate.
    The metric is measured by LoopLab's evaluator; never submit a claimed score.
    If a command stage reaches its deadline and `eval_deadline_grace_s` is enabled,
    the agent receives a `deadline_grace` checkpoint. Answer `extend` or `stop`;
@@ -894,6 +898,11 @@ the due report and reviews, then explicitly finalize it. CLI `finalize` and HTTP
 `run_abort` apply the same preflight, including pending evaluations.
 
 ## Novelty and cross-run knowledge
+
+Read the [external research workflow](external-research-workflow.md)
+for source→claim evidence, question/card lineage, staged fit→score, language, non-duplicative
+reports and the distinction between run-local lessons and shared memory. In external mode these
+are authored by the connected agent, not by an internal model role.
 
 A deep-research memo can be authored with `type: research_completed` and
 `data: {"memo": {"summary": "...", "findings": [...], "open_questions": [...],
@@ -993,6 +1002,13 @@ unique action ID, published `lesson_action_id` and a procedural Markdown body.
 The server checks that the lesson still cites measured, reliable node outcomes,
 then applies the existing portability prefilter and cross-task fingerprint
 promotion rule. The agent cannot set `status: promoted` itself.
+An optional pinned external-source import adds `external_source`, `validation_code`,
+`excluded_terms` and `exclusion_review`. The server runs the existing confined CPU probe
+outside command/memory locks, then rechecks exact current evidence before native admission.
+`looplab skill-distill` packages immutable selected Git blobs; preview is unvalidated,
+`--publish --url` uses this same route. Imports remain hidden auto candidates until actual
+cross-task support; source receipt does not establish scientific utility or semantic
+contamination freedom. See [source admission and limits](../audit/external-skill-source.md).
 An existing skill action may replay after its source lesson has retired or vanished:
 that ACK proves its earlier publication, not current eligibility or promotion.
 
@@ -1157,6 +1173,7 @@ seconds; it adds no evaluation wait of its own.
 | `pause` / `resume` `{"reason": "…"}` | Your words for a stop or a resume, shown in the run's history; an engine reason code is refused. |
 | `looplab agent-notify --hook NAME` / `?hook=NAME` | A named wake-up connection per agent (own command, vars, watermark, retries); `PUT /api/runs/{run_id}/agent-notify {"hook": NAME, ...}` per run. |
 | `gpu-gate` `{"run", "until": "node_evaluated" \| "stage_done" \| "gpu_released"}`, `drain` | Start after a node or stage of another run, or after it drains; `drain` finishes running GPU work and takes no new. |
+| `upload_per_query(..., dry_run=true)` / `POST /api/runs/{run_id}/per-query/preflight` | Metadata-only validation before reading arrays. Normal uploads repeat validation and fence the observed attempt; exact accepted retries retain their receipt. Payload/test identity and scalar consistency remain unchecked by preflight. |
 | `resume_per_query_upload(run_id, action_id)` | Resend a spooled per-query upload exactly, without the file; `pending_per_query_uploads` lists unanswered ones. |
 | `Node.protocol_version`, `data_refresh` | Each node's campaign protocol version (comparisons flag mixed versions); `amend_protocol kind=task` records data-mount CONTENT fingerprints. |
 
@@ -1195,6 +1212,17 @@ finish. No new candidate is invented by LoopLab in external mode. Reconnect the
 agent through MCP to the same UI/API server and run. A new stdio MCP session is
 normal; it does not create a new research run. Search `phases("recovery")` and read
 `phase_info("recovery")` before choosing a recovery action.
+
+**Cancel an unmaterialized queued inject.** Recover its original command ID first. Read
+`GET /api/runs/{run_id}/pending-inject?command_id=…&expected_generation=…` for the current request
+index/digest and run UID. This identity read grants no permission. To explicitly retire that exact head,
+POST `pending-inject-cancellation` with `expected_generation`, `expected_run_uid`, `command_id`,
+`request_index`, `request_digest`, a stable `action_id` and `reason`. It requires stopped ownership and
+rejects reservations, live/unknown owners and non-head work. No engine is started and no node is stopped.
+Keep the exact body; a lost HTTP response may follow a committed cancellation. Reread the pending-inject
+identity, then repeat only that exact action. Its receipt survives later queue progress; changed content
+under the same ID conflicts. A successful original admission remains historical, with cancellation recorded
+separately. MCP `api_request`, `operation_schema` and `saved_actions` support this lane.
 
 **Recover the original command without remembering its key.** The stdio
 `looplab harness-mcp` client now saves command POST bodies and keys **before HTTP**
@@ -1269,9 +1297,9 @@ Old writes made before this client feature cannot be reconstructed retrospective
    `succeeded` describes the control command, not a completed experiment.
    Wait for that command's terminal receipt before another state-changing command;
    seeing its effect or a live replacement engine can precede the worker's finish.
-4. Continue the outstanding decision, or explicitly pause/finalize. A checkpoint
-   may remain open after the evaluator command has finished; answer it before
-   treating the node as terminal. Finalization can owe a report or reviews.
+4. Continue an outstanding authority gate, or explicitly pause/finalize. Completed monitor observations
+   remain unreviewed in history; completion supplies no healthy verdict. Stage/deadline questions can still
+   need answers. Finalization can owe a report or reviews.
 
 If checkpoint reads or answers return **503**, inspect `source_health`: damaged,
 duplicate, orphaned or invalid checkpoint records (an unknown kind, a non-boolean
@@ -1336,7 +1364,7 @@ python -m benchmarks.external_session_smoke --out .tmp/held-proof --checkpoint-h
 python -m benchmarks.external_session_smoke --out .tmp/engine-loss-proof --engine-loss
 # Enable research, concept base, report and lesson/skill obligations across reconnect.
 python -m benchmarks.external_session_smoke --out .tmp/obligations-proof --obligations
-# Reconnect while a fast command's first advisory training review is unanswered.
+# Recover a completed command's preserved unreviewed training observation.
 python -m benchmarks.external_session_smoke --out .tmp/monitor-proof --monitor --obligations
 # Reconnect at deadline: extend, stop, exhausted cap; also test disabled grace.
 python -m benchmarks.external_deadline_smoke --out .tmp/deadline-proof
@@ -1477,187 +1505,9 @@ that claim before a new action ID starts work. Original requests and interrupted
 staging/worktrees remain after abandonment. A complete recovery UI remains separate
 work; the path and read are diagnostics.
 
-#### Recover the original proposal from another client
-
-Read current generation and upstream history first. Use the proposal's original
-`proposal_id` and `request_hash`, not a new action ID or guessed patch. HTTP
-`GET /api/runs/{run_id}/upstream/requests/{proposal_id}` and MCP
-`upstream_request(run_id, expected_generation, proposal_id, expected_request_hash,
-offset=0, limit=2048, expected_content_hash=None)` return **one** version-1 page.
-Each page includes `source_health`, `authority: diagnostic_only`, original
-`action_id` / `request_generation`, claim status/sequence, exact byte length,
-content/chunk SHA-256, base64 bytes and explicit `next_offset`. The HTTP/MCP
-maximum is 4096 bytes per page, comfortably below the MCP response cap.
-Assistant exposes the same read in Plan mode with a smaller default (1024 bytes)
-and maximum derived from its shared model result cap. Oversized Assistant
-requests fail explicitly, rather than returning a truncated recovery body.
-This read does not relax the MCP client's existing 1 MiB write request cap:
-recovering a larger historical HTTP proposal does not make it writable through
-MCP. Preserve the exact body and inspect its receipts before choosing an explicit
-supported recovery route; do not shrink or rewrite the body under its original ID.
-
-Follow `next_offset` explicitly, preserving the first `content_sha256` as
-`expected_content_hash`. Do not decode individual UTF-8 chunks: a byte boundary
-can split a character. Assemble all base64-decoded chunks in order, check the
-full content SHA-256 and byte count, then parse JSON and verify its canonical
-request hash. For a `HarnessAPI` client, with the identities obtained above:
-
-```python
-import base64, hashlib, json
-
-data, offset, sha = bytearray(), 0, None
-while True:
-    result = api.upstream_request(run_id, generation, proposal_id, request_hash,
-                                  offset, 4096, sha)
-    if result["status"] != 200 or result.get("code"):
-        raise RuntimeError("Request read unavailable; refresh explicitly")
-    page = result["body"]
-    data.extend(base64.b64decode(page["chunk"], validate=True))
-    sha = page["content_sha256"]
-    if page["next_offset"] is None:
-        break
-    offset = page["next_offset"]
-assert len(data) == page["total_bytes"]
-assert hashlib.sha256(data).hexdigest() == sha
-original = json.loads(data)
-canonical = json.dumps(original, sort_keys=True, separators=(",", ":"),
-                       ensure_ascii=False, allow_nan=False).encode()
-assert hashlib.sha256(canonical).hexdigest() == request_hash
-```
-
-The typed client verifies each page's generation, identity, health, claim status,
-pagination, encoding and chunk hash; incomplete HTTP 200 is unavailable, never
-an empty patch. There is no automatic paging, retry, worktree creation, gate
-execution or resume. A missing legacy request is `upstream_request_unavailable`,
-not reconstruction from current source. An unclaimed file left by failed claim
-publication is readable as `unclaimed`, granting no admission authority.
-`unresolved`, `completed` and `abandoned` describe the original proposal claim,
-not gate success. Changed identity or inter-page bytes refuse the read. After a
-generation reset, an original request can remain diagnostic under its original
-`request_generation`; its old body does not become a fresh current-generation
-write. Inspect and explicitly resolve receipts before deciding what to submit.
-
-A started claim with no verdict is unresolved; inspect its logs before asking the
-operator to abandon it through
-`POST /api/runs/{run_id}/upstream/recover`. Recovery grants no pass or resume. A new
-check requires a new action ID. Damaged event sources refuse even old ACK reads.
-Fresh checks and advancement also require the retained proposal manifest.
-`upstream_manifest_unavailable` names the run-relative
-`upstream/proposals/PROPOSAL_ID/manifest.json` when it is absent, unreadable,
-oversized or cannot be decoded and hashed; a readable different body returns
-`upstream_manifest_changed`. Inspect that named source and restore the original
-manifest or author a new proposal. Do not repair task/config/events solely for
-this manifest diagnostic. The refusal precedes a new gate claim and starts no
-evaluation. Exact saved proposal/check ACKs remain historical reads if events
-are complete; they do not certify the damaged manifest. Restoring original bytes
-does not abandon a settled gate, advance the base or resume. Submit a fresh
-explicit action only after reviewing current source/base/gate validity.
-The initial private Git repository is built in a proposal-specific
-`upstream/.git-init-PROPOSAL_ID` directory and published only after its base commit
-and ref are ready. After process loss, inspect the retained staging directory and
-resolve the claim explicitly; a fresh proposal uses a separate staging directory.
-Recovery never deletes that evidence or adopts an unfinished repository. Existing
-repositories damaged before this publication fix still require operator repair.
-Git ref locks use per-invocation `core.longpaths=true`; this does not remove
-every Windows Git cwd/worktree limit. An explicit OS path-length error, or Git's
-`Filename too long` / `$GIT_DIR too big` refusal, returns
-`upstream_git_path_unavailable`. Other Git failures retain their own diagnostic.
-The response does not expose raw stderr or host paths. A failed proposal records
-this code in upstream history, so an exact body/action retry recovers its failed
-receipt without repeating work. Inspect that history and preserve the run,
-archives and staging directories. For a path that Git cannot support, the
-operator can choose a shorter **absolute server run root for a new run** after
-reviewing the task/base and required evaluation. Do not move or rewrite the
-existing run: its recorded selectors may name absolute archive paths. This
-diagnostic grants no automatic training retry, gate pass, base advancement or
-resume; an unfinished claim still requires the explicit recovery described above.
-A Git command deadline returns `upstream_git_timeout_unavailable`; partial
-staging/worktree changes may remain. Inspect upstream history and the original
-action receipt before any retry. If the server cannot start Git because the
-executable is missing or denied, `upstream_git_process_unavailable` identifies
-the **UI/engine process environment** to repair. The remote MCP client's PATH
-does not install Git on the server. Both refusals are retained in a failed proposal
-receipt; exact recovery reads that refusal without rerunning Git or evaluation.
-HTTP 503 is still an unknown write acknowledgement until the original receipt
-has been read. Assistant reports these operator diagnostics without raw
-exception argv/output or host paths. A failed proposal supports no gate pass;
-new work after explicit environment repair requires a new action ID.
-Pending node overlays also use isolated Git when merging onto an advanced base:
-the server's global/environment Git configuration and caller repository are not
-merge inputs, and the child environment is credential-scrubbed. The merge has a
-10-second deadline. A genuine content conflict retains the node's original base
-and overlay for review. A missing/denied Git executable, timeout or other Git error
-is **unavailable materialization**, not a content conflict or permission to evaluate
-on an older base. The refusal occurs before replacing an existing node workspace
-or publishing `node_overlay_rebased`. Inspect the current node and server Git
-environment; after repair, retry materialization explicitly. This merge read has
-no proposal action receipt and does not itself train, advance the base or resume.
-After operator abandonment, an exact retry of an unfinished proposal/check returns
-`upstream_claim_abandoned`: inspect its history and use a new `action_id` for new
-work. It does not ask for another abandonment or engine wait, and starts no work.
-Changed bodies still conflict. Exact recovery ACKs and subsequently retained
-terminal results remain historical reads, including while an engine is running;
-they never restore an abandoned check's advancement authority. New actions still
-require engine exit.
-Typed MCP validates complete page/receipt identities, every passing gate leg,
-paired full samples, their means/SEM/delta and corresponding executions and costs.
-Statistical representation closeness never enlarges the declared scientific
-tolerance: both passing and failed equivalence verdicts must agree with the
-actual paired samples, including a zero tolerance. A contradictory rounded
-verdict is unavailable evidence even when its receipt hash matches.
-Nonfinite decoded numbers and overflowed total execution costs also supply no
-verdict. A malformed check ACK returns unknown without its body; malformed history
-is unavailable. Read the original receipt explicitly before recovery; validation
-does not automatically retry the check. Finite extra result fields remain readable
-and covered by the receipt hash.
-Typed upstream pages also recompute the active CAS revision from the returned
-generation, selector and advancement sequence. Visible advancements must agree
-with that current base or precede it; older pages need not contain its current
-advancement. A continuation requires a full history page, and a bounded candidate
-list must reach its declared limit. Contradictory HTTP 200 is unavailable without
-body; a valid empty terminal page remains readable. Reads perform no automatic
-paging, retry or advancement.
-Passing regressions require actual nonempty artifact receipts on both sides.
-Before a fresh CAS the server also validates every launched probe and repetition,
-the complete declared artifact sets, the operator's tolerance and source-score
-reproduction, and exact agreement with the gate's recorded execution charges.
-Those executions must lie between one matching current-generation gate start
-and one completion. The start must bind the exact check body and result context.
-An operator-abandoned claim cannot regain authority from a delayed completion;
-inspect the named `events.jsonl` source and buy an explicit fresh check/action ID.
-Shared evidence validation applies to direct HTTP and Assistant writes too;
-a stored passing flag and matching hash cannot substitute for these checks.
-An ACK must match the requested proposal and CAS evidence. A matching digest alone
-does not certify complete evidence. Incomplete HTTP 200 is unavailable/unknown,
-without a verdict body; read explicitly before recovery. A complete failed gate,
-including partial measurements, remains readable and grants no advancement.
-
-Full gate evaluations use the node pipeline's live `budget_extend{eval_timeout}`,
-stall/divergence settings and `metric_subject` policy. Changing the effective
-timeout after a gate requires a fresh check/action ID before CAS; exact retries
-still recover the original evidence. Probe-specific timeouts remain operator
-declared. These bounded gate executions do not open node monitor questions.
-
-The selected interpreter's distribution identity is read under the same
-run/task env merge and each validated operator-stage env override. A changed
-distribution exposed through declared `PYTHONPATH` invalidates advancement even
-when the server's own environment is unchanged. Identical environments share an
-observation within one read; gate and CAS always read again, with a shared
-30-second observation bound. Wrappers and undeclared dependency closures retain
-the scope limits in doc 72. A `valid` execution cannot contain a timed-out or
-failed stage; contradictory MCP evidence supplies no verdict. Genuine failed
-executions remain readable diagnostics.
-
-The scoped token may write this lane on external runs; internal runs require the
-owner credential. Task declarations and interrupted-claim recovery are owner-only.
-The UI Assistant uses the same lane with its ordinary approval policy. No hidden
-Maintainer model job is launched. Support and bounds are documented in
-[doc 72 §18](../72-node-to-framework-upstream-2026-10-01.md#18-upstream-lane).
-The code-base panel distinguishes a recorded completed check, an unfinished
-claim, operator abandonment and unavailable claim evidence. A late completion
-cannot restore an abandoned check, and an older pass does not replace a newer
-unfinished claim. Missing costs remain unavailable. Read current upstream
-evidence before advancement; the panel's recorded result is not CAS approval.
+Advanced recovery details, paged request reconstruction, interrupted-claim diagnostics and evidence
+validation are in [the proposal recovery reference](../72-node-to-framework-upstream-2026-10-01.md#external-proposal-recovery-reference-2026-11-11).
+Read that reference before recovering an unavailable proposal; a saved receipt grants no fresh gate pass.
 
 The MCP adapter forwards JSON API requests and limits a response to 256 KiB and
 a request body to 1 MiB. Query narrow routes for larger outputs; binary uploads
@@ -1703,6 +1553,13 @@ truncation, masking and glued text (`intake_notices`, `readability_warnings`; bo
 `authored_text`).
 
 ### Reports and readable external research
+
+The Report tab also offers an [optional independent review](../audit/native-report-review.md).
+It binds exact report quotes to original native outcomes. Reading is free; a paid review requires
+an explicit click. Discussing a nomination drafts an Assistant message, and its separate approval
+records research consideration only. It grants no fit/score/repeat and adds no launch gate.
+Owner `GET /api/runs/{run_id}/report-review` supplies exact digests for the corresponding paid
+`POST`; preserve its Idempotency-Key on recovery. Oversized or uncertain sources fail closed.
 
 Publish narratives with `report_generated`; the Report tab renders them beside the measured
 results with no model call (**Generate with model** is the separate paid action). Each

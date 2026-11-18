@@ -19,6 +19,7 @@ looplab relocate        Move a stopped run and record its new address without ch
 looplab inspect         Show the best result, stop reason, trust and comparability (--config: + raw launch snapshot)
 looplab comparability   What each run's number may be RANKED against — refuses across evaluations
 looplab replay          Pure fold of the event log → state (read-only)
+looplab policy-replay   Conditional policy comparison on recorded outcomes (read-only)
 looplab readmodel       Rebuild/check readmodel.sqlite — works on a live or crashed run (--check exits 1 if stale)
 looplab speculation-gate Validate paired Card-speculation evidence and publish the rollout receipt
 looplab timings         Wall-clock breakdown per node + run-level, reconciled against the run's duration
@@ -782,8 +783,7 @@ Readback never proves S3 flush.
 
 ## `inspect`
 
-Print the folded best result, stop reason, trust scans and comparability key. `--config` adds the raw
-launch snapshot; the effective-config API separately overlays `run_started` pins and the event-sourced
+Print the folded best result, stop reason, trust scans and comparability key. `--config` adds the raw on-disk launch config snapshot; the effective-config API separately overlays `run_started` pins and the event-sourced
 trust gate. A snapshot without an event log is printed as the only available record.
 
 ```bash
@@ -892,6 +892,46 @@ anything — the log records no digest to compare with; the state is the fold of
 looplab replay RUN_DIR             # the full state, JSON (unchanged; safe to pipe to jq)
 looplab replay RUN_DIR --summary   # a few lines
 ```
+
+## `policy-replay`
+
+Compare a current pure selection policy on a fixed recorded proposal tape. This reads only
+`RUN_DIR/events.jsonl`; it does not start an engine, model, evaluator or agent, and writes nothing.
+
+```bash
+looplab policy-replay RUN_DIR --policy greedy --n-seeds 3
+looplab policy-replay RUN_DIR --policy evolutionary --n-seeds 3 --max-attempts 100
+looplab policy-replay RUN_DIR --policy mcts --n-seeds 3
+```
+
+Supported policies are `greedy`, `evolutionary` and `mcts`, with their current default knobs;
+`n_seeds` is also the evolutionary initial population. The JSON records effective policy
+attributes, implementation SHA256s, input byte SHA256/size, run UID/generation and event sequence.
+These are diagnostic settings, not a reconstruction of the original launch settings.
+
+For each operator/parent choice, use the **earliest unused exact recorded match**, independent
+of its score. Only that chosen node's original facts through its terminal enter the policy state.
+A request outside the tape, missing dependency/outcome, different recorded protocol version,
+reset/recreated/retired lifecycle or unsupported action stops the replay. It never substitutes
+another branch or imputes a metric. Post-terminal confirmation/holdout/verifier/approval schedules,
+selection-setting changes and objective retargets are unsupported. Legacy null protocol versions
+remain unknown, not evidence of `same_protocol`.
+
+`coverage` is supported decisions divided by considered decisions, including the first
+unsupported decision. `replayed_attempts_to_champion` is a number only when the exact original
+champion node and attempt were reached. Counts mean **completed recorded nodes**, not physical
+evaluator calls, repairs, elapsed time or budget savings. The original terminal-position count is
+withheld when resets make it ambiguous. A truncated attempt budget can have coverage 1 while its
+target count is still null. An entirely unavailable source has null coverage and an explicit reason.
+
+This is conditional fixed-pool analysis. A differently ordered research history could generate
+different code or outcomes; no causal policy-quality improvement follows from this comparison.
+No generated proposal, new outcome, paid value estimate, scheduling/parallelism or grant is inferred.
+Sources must be regular, unchanged during descriptor capture, at most 128 MiB, complete through
+a final newline, with valid envelope versions, atomic-batch structure and a dense event sequence.
+Corruption is refused with exit 2, without prefix repair. SHA256 identifies captured bytes; it does
+not authenticate their author or attest remote storage flush. Flags cap seeds and replayed attempts
+at 1000. See [implementation acceptance](../audit/recorded-policy-replay.md).
 
 ## `readmodel`
 
@@ -3401,6 +3441,10 @@ looplab harness [--settings]
 
 Read research questions, experiments and reports without changing work. `--generation` is required;
 `--briefing` returns action context. `looplab research-map RUN_DIR --generation TOKEN`.
+Use repeatable `--collection NAME`, `--max-bytes 4096..65536`, `--max-items 1..100` and
+`--cursors '{"reports":"map1:…"}'` for exact per-collection continuation. The default whole JSON
+document budget is 65536 UTF-8 bytes and 40 items; the printed newline is framing.
+See [bounded reads](research-workflow-migration.md#bounded-research-reads) for omissions and changed collections.
 
 ## `harness-mcp`
 

@@ -59,6 +59,7 @@ import {
   traceScrollState, traceWidenStalled,
 } from './traceScrollModel.js'
 import { nodeTheme } from './conceptId.js'
+import { fmtDate } from './format.js'
 import { nodeCanonicalConcepts, parseConceptTagsInput } from './conceptChips.js'
 import { cardText } from './cardBoardModel.js'
 import { nodeCardLink, nodeConceptLanes } from './inspectorLinks.js'
@@ -511,7 +512,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
 
 function KV({ k, v }) {
   useUILanguage()
- return <><div className="k">{k}</div><div className="v">{v}</div></> }
+ return <><div className="k">{uiText(k)}</div><div className="v">{v}</div></> }
 
 // Summary for a COLLAPSED group's super-node (semantic zoom): aggregate + drill back to members.
 export function GroupSummary({
@@ -1075,6 +1076,11 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
       <KV k="parents" v={(n.parent_ids || []).join(', ') || '—'} />
       <KV k="activity" v={activity.label} />
       <KV k="lifecycle" v={n.status + (n.id === state.best_node_id ? ' — champion' : '')} />
+      <KV k="job role" v={n.job_role || 'not recorded'} />
+      <KV k="artifact dependencies" v={(n.uses || []).join(', ') || '—'} />
+      <KV k="lifecycle created" v={fmtDate(n.created_at)} />
+      <KV k="eval started" v={fmtDate(n.eval_started_at)} />
+      <KV k="terminal recorded" v={fmtDate(n.completed_at)} />
       <KV k="eval seconds" v={fmt(n.eval_seconds)} />
     </div>
     <CardLink link={cardLink} onOpenCard={onOpenCard} />

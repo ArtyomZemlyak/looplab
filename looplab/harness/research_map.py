@@ -19,6 +19,7 @@ from looplab.harness.campaign import experiments_of, read_journal
 from looplab.harness.journals import read_event_source, read_source
 from looplab.harness.overview import overview_freshness
 from looplab.core.run_ref import run_address
+from looplab.harness.map_paging import paginate, request_options, DEFAULT_MAX_BYTES, DEFAULT_MAX_ITEMS
 
 
 def _text(value, limit=1000):
@@ -44,14 +45,31 @@ def _bounded(row: dict, max_bytes: int = 1200) -> dict:
     result = short(row)
     result['detail_truncated'] = True
     if size(result) > max_bytes:
-        result = {k: result[k] for k in ('experiment_id', 'memo_id', 'card_id', 'node_id', 'seq', 'published_seq', 'at_node', 'action_id', 'title', 'summary', 'scope_sha256', 'question_card_id', 'question_card_statement', 'quality_issues', 'status', 'durable_status', 'activity', 'freshness') if k in result}
+        result = {k: result[k] for k in ('experiment_id', 'memo_id', 'card_id', 'node_id', 'seq', 'published_seq', 'at_node', 'action_id', 'title', 'summary', 'scope_sha256', 'question_card_id', 'question_card_statement', 'quality_issues', 'status', 'durable_status', 'activity', 'freshness', 'kind', 'job_role', 'metric_present', 'extra_metric_keys', 'parent_ids', 'uses', 'created_at', 'eval_started_at', 'completed_at', 'ts') if k in result}
         result['detail_truncated'] = True
+    if size(result) > max_bytes:
+        # The historical fallback could still exceed its own bound. Keep one whole bounded
+        # identity, never a chopped URL or an object that only pretends to fit.
+        stub = {'detail_truncated': True, 'item_omitted': True, 'reason': 'row_exceeds_item_bytes'}
+        for key in ('experiment_id', 'memo_id', 'card_id', 'node_id', 'seq', 'published_seq', 'action_id'):
+            if key in row:
+                value = row[key]
+                if isinstance(value, str):
+                    value = _text(value, 160)
+                candidate = {**stub, key: value}
+                if size(candidate) <= max_bytes:
+                    stub = candidate
+                    break
+        return stub
     return result
 
 
-def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 20, *, root: Path | None = None) -> dict:
+def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 20, *,
+             root: Path | None = None, collections=None, cursors=None,
+             max_bytes=DEFAULT_MAX_BYTES, max_items=DEFAULT_MAX_ITEMS) -> dict:
     from looplab.serve.report_history import report_version, report_versions
-    # A single MCP response stays below its transport cap; each page reports the effective limit.
+    # Validate options before scanning source; byte/item budgets apply to the WHOLE response.
+    request_options(collections, cursors)
     limit = min(limit, 20)
     events = read_event_source(rd)
     generation = run_generation_token(events)
@@ -121,7 +139,11 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
                       'title': _text(node.operator, 256), 'hypothesis': _text(idea.hypothesis),
                       'rationale': _text(idea.rationale), 'parent_card_id': _text(idea.parent_card_id, 256) or None,
                       'parent_card_statement': _text(state.cards[idea.parent_card_id].statement, 500) if idea.parent_card_id in state.cards else '',
-                      'parent_ids': list(node.parent_ids or []), 'concepts': list(state.node_concepts.get(node.id, [])),
+                      'parent_ids': list(node.parent_ids or []), 'uses': list(node.uses or []),
+                      'kind': node.kind, 'job_role': node.job_role,
+                      'created_at': node.created_at, 'eval_started_at': node.eval_started_at,
+                      'completed_at': node.completed_at,
+                      'concepts': list(state.node_concepts.get(node.id, [])),
                       'questions': [_text(x) for x in (idea.open_questions or [])[:16]],
                       'declared_work_kinds': sorted(work_kinds.get(node.id, set())),
                       'metric_present': node.metric is not None,
@@ -177,7 +199,7 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
                         'arm': _text(upload.get('arm'), 128), 'n_queries': upload.get('n_queries'),
                         'metrics': [_text(k, 160) for k in list(metric_rows)[:32] if isinstance(k, str)],
                         'consistency': {k: _text(consistency.get(k), 160) for k in ('status', 'metric', 'node_metric')}})
-    versions = report_versions(events, current_seq=(state.report or {}).get('published_seq'))
+    versions = report_versions(events, current_seq=(state.report or {}).get('published_seq'), max_versions=None)
     overview = None
     for event in reversed(events):
         data = event.data if isinstance(event.data, dict) else {}
@@ -192,29 +214,32 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
         overview['freshness'] = overview_freshness(events, overview['published_seq'], overview['at_node'], len(nodes))
     from looplab.harness.progress import _operator_directions
     from looplab.harness.research_quality import project as research_quality
-    return {'version': 1, 'run_id': canonical_id, 'run_uid': state.run_uid, 'generation': generation,
+    notice_path = rd / 'research_notice_dispositions.jsonl'
+    notice_dispositions, notice_health = (([], {'read_complete': False}) if notice_path.is_symlink()
+                                         else read_source(notice_path))
+    notice_complete = (notice_health.get('read_complete') is True
+                       and all(isinstance(row, dict) for row in notice_dispositions))
+    notice_dispositions = [row for row in notice_dispositions
+                           if isinstance(row, dict) and row.get('generation') == generation]
+    metadata = {'version': 1, 'run_id': canonical_id, 'run_uid': state.run_uid, 'generation': generation,
             'event_seq': events[-1].seq, 'goal': _text(state.goal, 2000),
-            'operator_directions': _operator_directions(state),
-            'quality': research_quality(state, experiments),
+            'operator_directions': _operator_directions(state, events=events, run_id=canonical_id, generation=generation),
+            'quality': research_quality(state, experiments, notice_dispositions=notice_dispositions,
+                                        notice_health=notice_complete),
             'source_health': {'protocol': health, 'decisions': decision_health, 'reviews': review_health, 'uploads': upload_health, 'atomic_across_sources': False},
-            'uploads': {'items': [_bounded(x) for x in list(reversed(uploads))[offset:offset + limit]], 'total': len(uploads),
-                        'offset': offset, 'limit': limit, 'has_more': offset + limit < len(uploads)},
-            'cards': {'items': [_bounded(x) for x in cards[offset:offset + limit]], 'total': len(cards),
-                      'offset': offset, 'limit': limit, 'has_more': offset + limit < len(cards)},
-            'research_memos': {'items': [_bounded(x) for x in list(reversed(memos))[offset:offset + limit]], 'total': len(memos),
-                               'offset': offset, 'limit': limit, 'has_more': offset + limit < len(memos)},
-            'reviews': {'items': [_bounded(x) for x in list(reversed(reviews))[offset:offset + limit]], 'total': len(reviews),
-                        'offset': offset, 'limit': limit, 'has_more': offset + limit < len(reviews)},
-            'decisions': {'items': [_bounded(x) for x in list(reversed(decisions))[offset:offset + limit]], 'total': len(decisions),
-                          'offset': offset, 'limit': limit, 'has_more': offset + limit < len(decisions)},
-            'experiments': {'items': [_bounded(x, 4096) for x in items[offset:offset + limit]], 'total': len(items), 'offset': offset,
-                            'limit': limit, 'has_more': offset + limit < len(items)},
-            'nodes': {'items': [_bounded(x) for x in nodes[offset:offset + limit]], 'total': len(nodes), 'offset': offset,
-                      'limit': limit, 'has_more': offset + limit < len(nodes)},
             'campaign_overview': _bounded(overview, 4096) if overview else None,
-            'reports': {'items': [_bounded(x) for x in versions['versions'][:limit]], 'total': versions['total'],
-                        'truncated': versions['total'] > limit},
             'notes': ['The protocol and event journal are independent reads; refresh before action.',
                       'Links are declarations, not proof of a measured result or execution permission.',
                       'Research questions in registrations are distinct from filed board cards.',
                       'Node activity is recorded lifecycle evidence, not proof the engine is currently running; check run progress.']}
+
+    rows = {'uploads': [_bounded(x) for x in reversed(uploads)],
+            'cards': [_bounded(x) for x in cards],
+            'research_memos': [_bounded(x) for x in reversed(memos)],
+            'reviews': [_bounded(x) for x in reversed(reviews)],
+            'decisions': [_bounded(x) for x in reversed(decisions)],
+            'experiments': [_bounded(x, 4096) for x in items],
+            'nodes': [_bounded(x) for x in nodes],
+            'reports': [_bounded(x) for x in versions['versions']]}
+    return paginate(metadata, rows, offset=offset, limit=limit, collections=collections,
+                    cursors=cursors, max_bytes=max_bytes, max_items=max_items)

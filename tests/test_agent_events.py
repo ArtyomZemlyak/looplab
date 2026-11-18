@@ -875,3 +875,40 @@ def test_unreadable_pending_ledger_never_sends_or_overwrites(tmp_path):
     pending.write_text('{"default":[{"event_ids":"broken"}]}')
     pump.deliver()
     assert not calls and ae.notify_status(root)['reaction_pending_readable'] is False
+
+
+def test_human_summaries_surface_attempt_generation_across_retries_and_questions(tmp_path):
+    """Multi-attempt nodes (gen 0 vs gen 1 after retry_node/node_reset) name the exact attempt
+    generation in human notification headlines while legacy unnumbered rows stay clean."""
+    rows = ae.derive_log_events("r", "uid", [
+        _ev(10, "stage_finished", node_id=72, generation=0, name="score", status="fail", exit_code=1),
+        _ev(11, "node_failed", node_id=72, generation=0, reason="crash",
+            failure_forensics={"headline": "missing receipt"}),
+        _ev(14, "node_evaluated", node_id=72, generation=1, metric=0.2279),
+        _ev(15, "node_failed", node_id=9, reason="legacy_without_gen"),
+    ])
+    assert rows[0]["summary"] == "node 72 (gen 0) stage score fail (exit 1)"
+    assert rows[0]["details"]["generation"] == 0
+    assert rows[1]["summary"] == "node 72 (gen 0) failed: missing receipt"
+    assert rows[2]["summary"] == "node 72 (gen 1) evaluated: metric=0.2279"
+    assert rows[3]["summary"] == "node 9 failed: legacy_without_gen"
+    assert "(gen" not in rows[3]["summary"]
+
+    cond = ae.derive_condition_events(
+        "r", "uid",
+        {"event_seq": 16, "at_node": 72, "evidence_revision": "e" * 64,
+         "pending_checkpoints": [{"checkpoint_id": "c-g1", "phase_id": "train_monitor",
+                                  "node_id": 72, "node_generation": 1, "stage": "train"}],
+         "candidate_blockers_if_expanding": [], "finish_report_due": False,
+         "finish_reviews_due": [], "next_step": {"code": "inspect_pending"},
+         "execution": {"engine_running": True}},
+        budget_left=1,
+    )
+    assert cond[0]["summary"] == "train_monitor question pending for node 72 (gen 1) stage train"
+    assert cond[0]["details"]["node_generation"] == 1
+
+    appended = ae.append_events(tmp_path, rows[:3] + cond)
+    msg = ae.compose_message(appended, limit_chars=2000)
+    assert "node 72 (gen 0) failed: missing receipt" in msg
+    assert "node 72 (gen 1) evaluated: metric=0.2279" in msg
+    assert "node 72 (gen 1) stage train" in msg

@@ -916,7 +916,7 @@ def latest_lesson_node_count(records, *, key: str = "at_node") -> int:
 
 class NodeStatus(str, Enum):
     pending = "pending"      # node_created seen, not yet evaluated (resume re-entry point)
-    evaluated = "evaluated"  # has a metric
+    evaluated = "evaluated"  # terminal; an artifact may legitimately have no primary scalar
     failed = "failed"        # ran but produced no usable metric
 
 
@@ -1929,6 +1929,10 @@ class Node(BaseModel):
     # Reset/repair retain it until an accepted in-place recreation replaces it.
     # Like the terminal anchor, it is derived only from events and stays internal.
     creation_event_seq: Optional[int] = Field(default=None, exclude=True)
+    # Event-derived timestamps stay out of replay snapshots/digests. Public HTTP projections expose
+    # them explicitly; legacy logs and reset/pending lifecycles leave them None.
+    created_at: Optional[float] = Field(default=None, exclude=True)
+    completed_at: Optional[float] = Field(default=None, exclude=True)
     error: str = ""
     # Failure taxonomy (set by node_failed): an experiment's own failure is a member of the closed
     # `FAILURE_REASONS` above; a node the engine ended carries its own word (`BENIGN_TERMINAL_REASONS`,
@@ -2160,6 +2164,11 @@ class Node(BaseModel):
     kind: Optional[str] = None
     # Declared job semantics for UI and the operator's execution-scope fence; independent of kind.
     job_role: Optional[str] = None
+    # Optional 64-hex evaluator identity pinned at candidate submission (doc 84 §6.1). Fold-internal
+    # like `uses_attempts` so historical golden `RunState.model_dump()` snapshots stay byte-identical.
+    expected_evaluator_digest: Optional[str] = Field(default=None, exclude=True)
+    # Explicit retry/resume input declarations stamped by `node_reset` (doc 84 §6.2); fold-internal.
+    resume_inputs: list[dict] = Field(default_factory=list, exclude=True)
     uses: list[int] = Field(default_factory=list)
     # THE PRODUCER LIFECYCLE each use is pinned to, `{str(artifact_id): generation}` (doc 73 §1.4,
     # round 3): the lifecycle the operator saw produced when the inject was accepted, stamped by
@@ -2250,8 +2259,8 @@ class Node(BaseModel):
     # claim from reusing a historical budget fact after a process crash.
     eval_activity_started: bool = Field(default=False, exclude=True)
     # Timestamp of the first generation-matched eval-start row for the CURRENT owner. Duplicates in
-    # one invocation do not refresh it; a genuine re-admission after resume does. Fold-internal like
-    # the receipts above and ``None`` when no usable event timestamp was recorded.
+    # one invocation do not refresh it; a genuine re-admission after resume does. Fold-internal;
+    # ``serve.node_activity.public_node_times`` exposes it without changing replay snapshots.
     eval_started_at: Optional[float] = Field(default=None, exclude=True)
 
     @property
@@ -2508,6 +2517,8 @@ class RunState(BaseModel):
     run_uid: str = ""
     # Explicit directory relocations, excluded from legacy public payloads; launch authority stays pinned.
     relocations: list[dict] = Field(default_factory=list, exclude=True)
+    # Native claim interpretation receipts; public result is the bounded Card overlay.
+    claim_reviews: dict[str, dict] = Field(default_factory=dict, exclude=True)
     task_id: str = ""
     goal: str = ""
     direction: str = "min"  # "min" | "max"
@@ -3020,6 +3031,8 @@ class RunState(BaseModel):
     aborted_nodes: list[int] = Field(default_factory=list)   # `node_abort`: skip/kill these nodes
     budget_overrides: dict = Field(default_factory=dict)     # `budget_extend`: max_seconds/eval
     pending_hints: list[dict] = Field(default_factory=list)  # `hint`: operator directives to steer
+    # Scoped hints retain terminal identities, so a late notification cannot resurrect old authority.
+    operator_direction_ledger: dict[str, dict] = Field(default_factory=dict)
     confirm_requests: list[int] = Field(default_factory=list)  # `force_confirm`: operator robustness ask
     confirmed_forced: list[int] = Field(default_factory=list)   # nodes a forced confirm finished (gate)
     # Generation-aware twins keep reset lifecycles distinct while the id-only lists above preserve the
@@ -3121,6 +3134,8 @@ class RunState(BaseModel):
     # the Trust panel. Under trust_gate=audit they are advisory; hard signals under gate/block exclude
     # best-selection/breeding and may mark the node infeasible.
     reward_hacks: list[dict] = Field(default_factory=list)
+    # Latest original numerical behavior observation per node; advisory and never selection input.
+    metric_behavior_scans: dict[int, dict] = Field(default_factory=dict)
     # FOREAGENT predict-before-execute picks {node_id, confidence, chosen, ...}, folded from
     # `foresight_selected` events. They do not re-rank evaluated nodes; the fold keeps them so the
     # world model can be primed with its OWN track record (did past predicted-best picks beat their

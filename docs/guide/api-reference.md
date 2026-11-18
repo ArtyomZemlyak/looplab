@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-220 routes on 189 paths; 10 deprecated; 27 with a declared response model.
+228 routes on 196 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -233,6 +233,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/deletions/{operation_id}` | *Observe Run Deletion* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/events` | Stream canonical public state frames — a full `state` frame first, then `state_delta` | — |  |
 | `GET` | `/api/runs/{run_id}/experiments/{experiment_id}/comparison` | The experiment's declared contrasts, computed now by LoopLab with provenance. | — |  |
+| `GET` | `/api/runs/{run_id}/external-telemetry` | Sanitized revision/usage receipts, separate ledgers and explicit unknown coverage. | — |  |
 | `GET` | `/api/runs/{run_id}/gpu-gate` | This run's GPU gate and what it still waits for (empty `blockers` = open). | — |  |
 | `PUT` | `/api/runs/{run_id}/gpu-gate` | Hold this run's GPU admission, or start it only after other runs' engines exit. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-checkpoints` | Pending mandatory stage checks and live training/rank observations. | — |  |
@@ -242,6 +243,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/harness-handoff` | Credential-free connection context for an already launched external run. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-hypotheses` | Live pure-belief board and whether configured duplicate review is due. | — |  |
 | `POST` | `/api/runs/{run_id}/harness-hypotheses` | Record a duplicate review; a merge and its receipt append atomically. | — |  |
+| `GET` | `/api/runs/{run_id}/harness-identity` | Bounded identity discovery; reads no broad state projection and starts no work. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-monitor-rules` | The run's declared routine-answer rules for checkpoints (null when none). | — |  |
 | `PUT` | `/api/runs/{run_id}/harness-monitor-rules` | Declare which checkpoint questions are ROUTINE, so LoopLab answers them itself. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-policy` | What the operator lets the agent amend in this run, and its node-addition cap. | — |  |
@@ -271,8 +273,11 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/notify-scope/attach` | Attach exactly this run to one existing hook, preserving all other configuration. | — |  |
 | `POST` | `/api/runs/{run_id}/novelty-preview` | Compare an idea with tried nodes using LoopLab's pure graded novelty rubric. | — |  |
 | `POST` | `/api/runs/{run_id}/operator-notes` | Record durable operator guidance, never agent-authored operator authority. | — |  |
+| `GET` | `/api/runs/{run_id}/pending-inject` | Read an original command's exact queue identity; this grants no cancellation authority. | — |  |
+| `POST` | `/api/runs/{run_id}/pending-inject-cancellation` | Cancel only an exact unmaterialized inject head with stopped ownership; never spawn. | — |  |
 | `GET` | `/api/runs/{run_id}/per-query` | The run's current per-query uploads (latest per node and test) and their test ids. | — |  |
 | `POST` | `/api/runs/{run_id}/per-query` | Upload a terminal node's per-query arrays; LoopLab derives the shared test id. | — |  |
+| `POST` | `/api/runs/{run_id}/per-query/preflight` | Check metadata before reading arrays. The upload rechecks under its write fences. | — |  |
 | `GET` | `/api/runs/{run_id}/profile-measurements` | Read declared profile keys from current node measurements without recomputation. | — |  |
 | `POST` | `/api/runs/{run_id}/project` | *Assign Run* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/protocol` | The run's pre-registered experiments, its amendment audit trail and the agent policy. | — |  |
@@ -282,6 +287,8 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/readiness-bindings` | Bind a terminal producer manifest to unchanged scientific scope; grants no execution. | — |  |
 | `POST` | `/api/runs/{run_id}/report-figures` | Copy ONE raster image artifact into the run's report-figure store and return its id | — |  |
 | `GET` | `/api/runs/{run_id}/report-figures/{figure_id}` | Serve one stored report figure (re-verified against its own sha256). | — |  |
+| `GET` | `/api/runs/{run_id}/report-review` | *Get Report Review* (no docstring) | — |  |
+| `POST` | `/api/runs/{run_id}/report-review` | *Post Report Review* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/report/versions` | Every `report_generated` row, newest first: seq, when, who published it, its content | — |  |
 | `GET` | `/api/runs/{run_id}/report/versions/{seq}` | The sanitized content of the report published at `seq` (the fold's own sanitizer). | — |  |
 | `GET` | `/api/runs/{run_id}/report/versions/{seq}/metric-bindings` | Resolve report references to matching native per-query upload metadata. | — |  |
@@ -315,6 +322,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/upstream/proposals` | Author a generalized capability in a run-owned Maintainer git worktree; no base switch. | — |  |
 | `POST` | `/api/runs/{run_id}/upstream/recover` | Operator abandonment of an interrupted claim, granting no pass and no resume. | — |  |
 | `GET` | `/api/runs/{run_id}/upstream/requests/{proposal_id}` | Read one fenced base64 page of the original proposal. Diagnostic only; starts no work. | — |  |
+| `GET` | `/api/runs/{run_id}/work-claims` | Read authored work declarations of selected same-task peers; no exclusivity or launch gate. | — |  |
 
 ### `/api/scope-report`
 

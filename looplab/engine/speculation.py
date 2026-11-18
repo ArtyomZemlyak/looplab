@@ -353,6 +353,7 @@ class CardSession:
     notify: Any = None
     eval_inflight: set[tuple[int, int]] = field(default_factory=set)
     research_spawned: bool = False
+    research_allowed: bool = True
     boundary_owed: bool = False
     yield_outer: bool = False
     progressed: bool = False
@@ -3056,6 +3057,7 @@ class SpeculationMixin:
             source=result.source,
             steering_context=result.steering_context,
             cross_run_receipt=result.cross_run_receipt,
+            audit_events=result.audit_events,
         )
         if card_id is None:
             if getattr(self, "_card_stage_attached_to", None) is not None:
@@ -3085,17 +3087,7 @@ class SpeculationMixin:
                     "run_is_stopping", node_id=result.at_node, prospective=True, speculative=True,
                     operator=str((result.action or {}).get("kind") or ""))
             return True, False, str(getattr(self, "_card_stage_refusal", "") or "unrecorded")
-        # OPEN[raw-stage-card-and-audit-are-separate-appends] the Card commit above
-        # (`card_reservation.py::_stage_prepared_card`: one `card_added`, alone, under its own tail
-        # CAS) and these proposal-audit events are separate appends. A crash or append failure after
-        # EV_CARD_ADDED leaves an executable durable Card whose novelty/governance audit prefix was
-        # silently lost; `_spec_raw_stage_result` was already cleared, so resume cannot repair it.
-        # Commit the Card and its bounded audit intents in one tail-fenced append_many, or add a
-        # durable proposal receipt plus recovery gate that keeps the Card non-selectable until it
-        # is closed. Indexed by review 2026-09-22 (ES1-08); it stays open while the staging commit
-        # is that lone append:
-        # proof:`present:self.store.append(EV_CARD_ADDED, plan.payload, expected_last_seq=tail)@looplab/engine/card_reservation.py`
-        self._publish_proposal_events(result.audit_events)
+        # The stager atomically committed a new Card with this exact buffered audit prefix.
         return True, True, None
 
     async def _close_developer_sentinel_once(self) -> bool:
@@ -3484,7 +3476,8 @@ class SpeculationMixin:
         """
 
         try:
-            await self._evaluate(node_id, anyio.CapacityLimiter(1), max_eval_seconds)
+            from looplab.engine.repair_slots import RepairableEvalSlot
+            await self._evaluate(node_id, RepairableEvalSlot(), max_eval_seconds)
         except BaseException as exc:  # noqa: BLE001 — re-raised unless it is a pure run-ending stop
             stop = deferrable_run_stop(exc)
             if stop is None:
@@ -3699,6 +3692,24 @@ class SpeculationMixin:
         if session.open_for_production(self._session_gates(current, session)):
             if self._start_request_producers(current, session):
                 session.progressed = True
+    async def _admit_ready_before_cadence(self, max_eval_seconds, wall_deadline) -> bool:
+        """One shared consumer fill before the paid outer pass, with no producer/research work.
+
+        The run-scoped evaluator owns the child lifetime. Production is closed because the outer
+        cadence owns this boundary: freshness refusals stay refusals, but their selection/discard
+        remains at its existing post-cadence boundary. Every resource/attempt/budget/stop recheck
+        still lives in the ordinary admission phase below. True requests an outer refresh after
+        admission or a released stale reservation; it does not certify that a child started.
+        """
+        self._ensure_speculation_state()
+        if self._eval_task_group is None:
+            return False
+        session = CardSession(max_eval_seconds=max_eval_seconds, wall_deadline=wall_deadline,
+                              eval_task_group=self._eval_task_group, eval_inflight=self._eval_inflight,
+                              boundary_owed=True, yield_outer=True, research_allowed=False)
+        await self._card_phase_admit_evals(session)
+        return session.progressed
+
     async def _card_phase_admit_evals(self, session: CardSession) -> bool:
         """Admit fresh, resource-fitting pending Nodes up to the live consumer width.
 
@@ -3709,7 +3720,8 @@ class SpeculationMixin:
         if not session.open_for_admission(self._session_gates(current, session)):
             return False
         selection_changed = False
-        while len(session.eval_inflight) < max(1, int(self._eval_parallel)):
+        from looplab.engine.repair_slots import occupied_lifecycles
+        while occupied_lifecycles(self, session.eval_inflight) < max(1, int(self._eval_parallel)):
             # A SPEND CEILING an adopted evaluation deferred (review 2026-09-22, ENG2-02) admits
             # nothing more: the deferral only lets evaluations ALREADY paid for finish, and the run
             # loop raises the stop once they have (`_raise_deferred_eval_budget_stop`).  Asked every
@@ -3823,7 +3835,7 @@ class SpeculationMixin:
             if _eval_time_admission_refused(self, current, chosen, session.max_eval_seconds):
                 self._release_gpus(reservation.get("gpu_ids"))
                 break
-            if not session.research_spawned:
+            if session.research_allowed and not session.research_spawned:
                 # Latch on the SPAWN, never on the ask. `_spawn_research` answers "was research due
                 # AND started?", and a session that asked at n=1 and got NO (as it did under the
                 # pre-2026-08-07 `deep_research_every`=3, and still does whenever an operator spells

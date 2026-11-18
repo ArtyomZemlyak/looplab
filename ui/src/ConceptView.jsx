@@ -1512,7 +1512,10 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
                 : 'included in the concept rollup under the current eligibility rule'
             const rollupLabel = ref.metric === null ? 'unavailable'
               : ref.feasible === false ? 'excluded' : 'eligible'
-            const refSummary = `Experiment #${ref.node_id}, attempt ${ref.node_generation}, ${ref.status}, ${constraint}, membership ${ref.membership_provenance}, ${rollup}`
+            const operator = state.nodes?.[ref.node_id]?.operator
+              || state.nodes?.[ref.node_id]?.idea?.operator || ''
+            const refLabel = `Experiment #${ref.node_id}${operator ? ` · ${operator}` : ''} · attempt ${ref.node_generation}`
+            const refSummary = `${refLabel}, ${ref.status}, ${constraint}, membership ${ref.membership_provenance}, ${rollup}`
             return <tr key={`${id}:${ref.node_id}:${ref.node_generation}`} className={'cv-erow' + (inspecting ? ' hit' : '')}><td className="cv-name" style={{ paddingLeft: 12 + (depth + 1) * 18 }}>
               <button type="button" className="cv-exp-button" disabled={!lifecycleMatches}
                 aria-current={inspecting ? 'true' : undefined}
@@ -1520,7 +1523,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
                 aria-label={`${refSummary}. ${lifecycleMatches
                   ? inspecting ? 'Shown in the Inspector beside this tree' : 'Inspect it beside this tree'
                   : 'This attempt is not in the displayed run snapshot'}`}>
-                <span className="cv-exp"><Marked text={`Experiment #${ref.node_id} · attempt ${ref.node_generation}`} query={searching ? query : ''} /></span>
+                <span className="cv-exp"><Marked text={refLabel} query={searching ? query : ''} /></span>
                 <span className="badge"><Marked text={ref.status} query={searching ? query : ''} /></span>
                 <span className={'cv-ref-facts' + (rollupLabel === 'excluded' ? ' excluded' : '')}>
                   {constraintLabel}{uiText(" · membership · ")}{ref.membership_provenance}

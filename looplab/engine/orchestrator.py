@@ -1050,6 +1050,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # still going to charge against `max_eval_seconds`, so an admission gate can subtract it
         # instead of comparing only completed charges (`resources.py::eval_time_admission_blocked`).
         self._eval_time_reservations: dict[tuple[int, object], float] = {}
+        self._pre_cadence_admission_done = False
+        self._eval_repair_yielded: set[tuple[int, int]] = set()
+        # Actual chain spend not yet carried by a terminal; never hand this back as future budget.
+        self._eval_unsettled_charges: dict[tuple[int, int], float] = {}
         self.timeout = _opt("timeout")
         self.crash_after = crash_after
         self._drain_only = bool(drain_only)
@@ -1373,6 +1377,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         one extra turn, no busy spin, and the finish contract itself is untouched.
         """
 
+        if getattr(getattr(self, 'sandbox', None), 'requires_native_binding', False):
+            from looplab.engine.cluster_attempt import open_claims
+            if open_claims(self.store.read_all()):
+                self._eval_drain_requested = True
+                return True
         if not self._evals_inflight():
             return False
         self._eval_drain_requested = True
@@ -1869,6 +1878,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # below then reaches its CAS over a log with no evaluation in flight.
             if self._eval_drain_requested:
                 await self._drain_adopted_evals()
+                if getattr(getattr(self, 'sandbox', None), 'requires_native_binding', False):
+                    from looplab.engine.cluster_attempt import drain_before_finish
+                    if not await drain_before_finish(self):
+                        return fold(self.store.read_all())
             # …and a finish refused over the operator's queued TRACKS serves them here, before the
             # decision prefix is read (`engine/track_lane.py::drain_track_requests`); a halt or the
             # spent wall clock stops it with the rest left queued, and the gate then finishes.
@@ -1946,6 +1959,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # stable abort scope unconditionally — so its drain is spelled out here rather than
                 # delegated to `_refuse_finish_over_adopted_evals`.
                 await self._drain_adopted_evals()
+                if getattr(getattr(self, 'sandbox', None), 'requires_native_binding', False):
+                    from looplab.engine.cluster_attempt import drain_before_finish
+                    if not await drain_before_finish(self):
+                        return fold(self.store.read_all())
                 # …and a ceiling an evaluation deferred DURING that drain still ends the run as the
                 # ceiling, before the abort's terminal — the disposition it had when the child's
                 # raise cancelled this drain outright (ENG2-02), minus the siblings it cost.
@@ -2189,6 +2206,17 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                         None if max_s is None else start + max_s,
                     )
                     continue
+                # A committed pending Node needs no producer request to own a consumer slot. Fill
+                # it before a paid cadence, through the SAME admission phase, once per outer pass.
+                # A refresh after admission rechecks all outer controls; the latch prevents fast
+                # consumers or blocked candidates from starving the cadence through that refresh.
+                if (not getattr(self, "_pre_cadence_admission_done", False)
+                        and any((node.id, node.attempt) not in self._eval_inflight
+                                for node in speculative_state.pending_nodes())):
+                    self._pre_cadence_admission_done = True
+                    if await self._admit_ready_before_cadence(
+                            max_es, None if max_s is None else start + max_s):
+                        continue
 
             # The translated Card denominator changes whenever an attempt becomes tombstoned/gated or
             # a speculative freshness drop lands.  Refresh it BEFORE the Strategist reads
@@ -2201,6 +2229,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # helper, so the tail read on the next line already carries them.
             state = await self._offload_cadence(functools.partial(self._run_cadences, state))
             self._card_boundary_debt = False     # the boundary a Card session returned for is paid
+            self._pre_cadence_admission_done = False
             post_cadence_events = self.store.read_all()
             post_cadence_seq = post_cadence_events[-1].seq if post_cadence_events else -1
             if post_cadence_seq != decision_seq:
@@ -3792,7 +3821,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
     def _ensure_plan(self, state: RunState) -> bool:
         """Write the plan row when none exists, or a re-cut one when due (`engine/plan.py`);
         True when a row was appended. Main task only; a 0 reserve fraction writes nothing."""
-        from looplab.engine.plan import build_plan, replan
+        from looplab.engine.plan import build_plan, replan, plan_population
         if self._endgame_reserve_frac <= 0.0 or getattr(self, "_speculation_gate_calibration", False):
             return False
         # 3 is what a real Engine settles `n_seeds` to; a double's 0 cut a plan with no seed phase.
@@ -3803,14 +3832,17 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # The operator's injected nodes are cut out of the reserve's base (doc 69 69.25,
         # `Settings.endgame_inject_recut`; 0 = the historical cut, byte for byte). Counted over the
         # nodes THIS fold holds, so a concurrent inject build's row not yet folded is not counted.
+        basis = "card_budget" if self.card_driven_selection else "all_nodes"
+        population = plan_population(state, basis=basis)
+        at_node = len(population)
         injected = 0
         if self._endgame_inject_recut:
             from looplab.engine.plan import operator_injected
-            injected = operator_injected(self.store.read_all(), state.nodes)
+            injected = operator_injected(self.store.read_all(), population)
         if state.plan is None:
             row = build_plan(max_nodes=max_nodes, n_seeds=n_seeds,
-                             reserve_frac=self._endgame_reserve_frac, at_node=len(state.nodes),
-                             endgame_sweep=self._endgame_sweep, injected=injected)
+                             reserve_frac=self._endgame_reserve_frac, at_node=at_node,
+                             endgame_sweep=self._endgame_sweep, injected=injected, node_count_basis=basis)
         else:
             from looplab.agents.strategist import stall_rung, strategist_stall_window
             rung, _started = stall_rung(
@@ -3819,10 +3851,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # after it (`Settings.endgame_stall_nodes`; 0 = the permanent endgame, byte for byte);
             # `champion` is what an episode is measured against and closed on.
             row = replan(state.plan, max_nodes=max_nodes, n_seeds=n_seeds,
-                         reserve_frac=self._endgame_reserve_frac, at_node=len(state.nodes),
+                         reserve_frac=self._endgame_reserve_frac, at_node=at_node,
                          stall_rung=rung, endgame_sweep=self._endgame_sweep,
                          stall_nodes=self._endgame_stall_nodes, champion=state.best_node_id,
-                         injected=injected)
+                         injected=injected, node_count_basis=basis)
         if row is None:
             return False
         self.store.append(EV_PLAN, row)

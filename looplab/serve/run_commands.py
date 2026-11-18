@@ -61,7 +61,7 @@ from looplab.serve.engine_proc import (
     EngineSpawnOutcomeUnknown, _claim_and_spawn_resume, _engine_alive, _engine_liveness,
     _spawn_engine, child_exited, spawn_snapshot_refusal)
 from looplab.serve.http import generation_conflict, refusal
-from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
+from looplab.serve.protocol import COLLABORATION_EVENTS, SEMANTIC_CAS_EVENTS, CONTROL_EVENTS
 from looplab.serve.protocol import (COMMAND_ACTIVE_STATUSES, COMMAND_TERMINAL_STATUSES,
                                     DEADLINE_PASSED_BEFORE_INTENT, ENGINE_START_UNCERTAIN,
                                     QUEUED_WHILE_STOPPED, command_intent_marker, deadline_passed,
@@ -2513,6 +2513,30 @@ class RunCommandService:
             record = {**record, "served_by_drain": True}
         return self._terminal(path, record, "succeeded")
 
+    def _missing_intent_terminal(self, path, record, *, attached=False):
+        message = ("the attached external finalize intent is missing or changed" if attached else
+                   "the durable command record points to a marked intent that is missing or changed")
+        return self._terminal(path, record, "failed", error=_error(
+            "command_intent_missing", message,
+            "do not retry automatically; inspect/repair the event log and command record", retryable=False))
+
+    def _settled_before_respawn(self, rd, path, record, observation):
+        """One decision under the caller's sequencer, before either replacement spawn path."""
+        if self._reconcile_inject_cancellation(rd, path, record, observation) is not None:
+            return True
+        if self._postcondition(rd, record, observation):
+            self._succeeded(rd, path, record)
+            return True
+        return False
+
+    def _reconcile_inject_cancellation(self, rd, path, record, observation):
+        from looplab.serve.pending_inject import reconcile_record
+        return reconcile_record(self, rd, path, record, observation)
+
+    def _settle_cancelled_inject_worker(self, rd, path, record, observation):
+        from looplab.serve.pending_inject import settle_worker
+        return settle_worker(self, rd, path, record, observation)
+
     def _reconcile_observation(
             self, rd: Path, path: Path, record: dict,
             observation: Optional[CommandObservation] = None) -> dict:
@@ -2536,6 +2560,8 @@ class RunCommandService:
                 "the durable command record points to an intent that is missing or changed",
                 "do not retry automatically; inspect/repair the event log and command record",
                 retryable=False))
+        if (cancelled := self._reconcile_inject_cancellation(rd, path, record, observation)) is not None:
+            return cancelled
         status = record.get("status")
         if status not in {"failed", "timed_out"}:
             return record
@@ -2602,6 +2628,8 @@ class RunCommandService:
         """
         observation = self._observe(rd)
         record = self._reconcile_observation(rd, path, record, observation)
+        if record.get("pending_inject_cancellation") is not None:
+            return record
         if record.get("status") not in {"failed", "timed_out"}:
             return record
         updated = dict(record)
@@ -2660,7 +2688,7 @@ class RunCommandService:
         if/elif chain over the same event types whose final `else` was the COMMENT recheck, so any
         type it did not name — a new collaboration event, or a corrupted record — was silently
         rechecked against a comment id it does not have.  A missing handler is now a refusal, and
-        the registry's cross-check against `COLLABORATION_EVENTS` keeps that branch unreachable.
+        the registry's cross-check against `SEMANTIC_CAS_EVENTS` keeps that branch unreachable.
         """
         spec = CONTROL_SPECS.get(event_type)
         handler = spec.precondition if spec is not None else None
@@ -3183,10 +3211,15 @@ class RunCommandService:
                                 safe_error["paths"] = paths
                             record["error"] = safe_error
                         else:
+                            msg = str(detail)
+                            remedy = "correct the command payload and submit it with a new idempotency key"
+                            if "has unknown field(s):" in msg and " (" in msg and msg.endswith(")"):
+                                hint = msg[msg.rfind(" (") + 2 : -1]
+                                remedy = f"correct the command payload ({hint}) and submit it with a new idempotency key"
                             record["error"] = _error(
                                 "invalid_command" if exc.status_code < 404 else "command_target_not_found",
-                                str(detail),
-                                "correct the command payload and submit it with a new idempotency key")
+                                msg,
+                                remedy)
 
                     # The cross-process sequencer already excludes competing creators. Atomic replace
                     # publishes either no record or the complete record, never an immortal empty
@@ -4040,21 +4073,15 @@ class RunCommandService:
             decision_baseline = None
             if (record.get("attached")
                     and not self._attached_finalize_intact(rd, record, observation)):
-                self._terminal(path, record, "failed", error=_error(
-                    "command_intent_missing",
-                    "the attached external finalize intent is missing or changed",
-                    "do not retry automatically; inspect/repair the event log and command record",
-                    retryable=False))
+                self._missing_intent_terminal(path, record, attached=True)
                 return None, record
             recorded_event_seq = record.get("event_seq")
             if recorded_event_seq is not None and (
                     intent is None or intent.seq != recorded_event_seq):
-                self._terminal(path, record, "failed", error=_error(
-                    "command_intent_missing",
-                    "the durable command record points to a marked intent that is missing or changed",
-                    "do not retry automatically; inspect/repair the event log and command record",
-                    retryable=False))
+                self._missing_intent_terminal(path, record)
                 return None, record
+            if (cancelled := self._reconcile_inject_cancellation(rd, path, record, observation)) is not None:
+                return None, cancelled
             # Once this command's marked intent is durable, never re-run state preflight during
             # recovery.  Its own fold may have cleared an approval gate or satisfied pause; treating
             # that changed state as a fresh submission would incorrectly turn a succeeded command
@@ -4104,7 +4131,7 @@ class RunCommandService:
                 record["baseline_seq"] = decision_baseline
                 event_data = dict(record.get("data") or {})
                 event_data["_command_id"] = self._intent_marker(record, command_id)
-                if event_type in COLLABORATION_EVENTS:
+                if event_type in SEMANTIC_CAS_EVENTS:
                     intent, decision_baseline, append_error = self._append_collaboration_intent(
                         rd, record, event_data)
                     if append_error is not None:
@@ -4139,7 +4166,7 @@ class RunCommandService:
                             "the run changed before the restart intent could be recorded",
                             "refresh the run and submit a new restart command", retryable=False))
                         return None, record
-                elif event_type not in COLLABORATION_EVENTS:
+                elif event_type not in SEMANTIC_CAS_EVENTS:
                     intent = store.append(event_type, event_data)
                 record["baseline_seq"] = decision_baseline
             if intent is not None:
@@ -4273,6 +4300,8 @@ class RunCommandService:
         # message, and `_admit` read it from this same record field.
         event_type = str(record.get("event_type") or "")
         observation = self._observe(rd)
+        if self._settle_cancelled_inject_worker(rd, path, record, observation):
+            return
         if (spec.engine_policy is EnginePolicy.ENSURE_RUNNING
                 and self._postcondition(rd, record, observation)):
             self._succeeded(rd, path, record)
@@ -4292,6 +4321,8 @@ class RunCommandService:
         while True:
             self._heartbeat_execution(rd, command_id)
             observation = self._observe(rd)
+            if self._settle_cancelled_inject_worker(rd, path, record, observation):
+                return
             liveness = self._engine_state(rd)     # after the observation, as `_postcondition` probed
             if self._monitor_postcondition(rd, record, observation, liveness, gate):
                 self._succeeded(rd, path, record)
@@ -4364,8 +4395,7 @@ class RunCommandService:
             if spec.engine_policy is EnginePolicy.RESTART_AFTER_EXIT and not alive:
                 with self.sequence(rd):
                     retry_observation = self._observe(rd)
-                    if self._postcondition(rd, record, retry_observation):
-                        self._succeeded(rd, path, record)
+                    if self._settled_before_respawn(rd, path, record, retry_observation):
                         return
                     retry_liveness = self._engine_state(rd)
                     if retry_liveness is None:
@@ -4380,8 +4410,7 @@ class RunCommandService:
             elif spec.engine_policy is not EnginePolicy.NO_SPAWN and not alive:
                 with self.sequence(rd):
                     retry_observation = self._observe(rd)
-                    if self._postcondition(rd, record, retry_observation):
-                        self._succeeded(rd, path, record)
+                    if self._settled_before_respawn(rd, path, record, retry_observation):
                         return
                     if self._left_for_the_next_search(record, retry_observation):
                         self._succeeded(rd, path, record, deferred=True)

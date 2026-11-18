@@ -66,6 +66,10 @@ export default function ExperimentResult({ node: n, state = {}, onTab }) {
     <p className="experiment-result-objective">{((key || uiText('Objective')))} · {uiText(direction)}</p>
     <dl className="experiment-result-values">
       <div><dt>{uiText("Evaluation score")}</dt><dd>{score ? fmt(n.metric) : '—'}</dd>
+        {!score && completed && <p className="muted">{n.kind === 'artifact'
+          ? uiText('Artifact job: a ranking scalar is not expected. Inspect secondary outputs or declared comparisons; completion is not a measured model improvement.')
+          : uiText('No primary scalar is recorded. This is unavailable evidence, not zero; inspect the score stage, secondary metrics and declared comparisons.')}</p>}
+        {n.job_role && <p className="muted">{uiText('Job role')}: {n.job_role}</p>}
         {score && <p className={caveated ? 'experiment-result-warning' : 'muted'} title={uiText(sourceHelp)}>{uiText(sourceLabel)}</p>}</div>
       <div><dt>{uiText("Confirmation mean")}</dt><dd>{((confirmed ? fmt(n.confirmed_mean) : uiText('Not confirmed')))}</dd>
         <p>{uiText(measurement.reliability)}</p>

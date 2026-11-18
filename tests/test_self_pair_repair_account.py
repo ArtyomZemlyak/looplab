@@ -232,3 +232,15 @@ def test_the_judge_prompt_gets_the_repair_account_the_empty_diff_never_carried(t
     assert "looplab_stages.json" in prompt
     assert "raise the train stage timeout to 22000s" in prompt
     assert lessons and lessons[0]["role"] == "developer"
+
+
+@pytest.mark.parametrize("repair_prose", ["fix the port collision", ""])
+def test_self_repair_lesson_never_credits_the_original_proposal_prose(tmp_path, repair_prose):
+    state = _repaired_then_scored(tmp_path, repairs=1, rationale=repair_prose)
+    lesson = _self_pair_lesson(_engine(tmp_path), state)
+    assert "tighten the mining loop" not in lesson["statement"]
+    assert "fixed the original recipe" not in lesson["statement"]
+    if repair_prose:
+        assert repair_prose in lesson["statement"]
+    else:
+        assert lesson["statement"].endswith("and then scored")

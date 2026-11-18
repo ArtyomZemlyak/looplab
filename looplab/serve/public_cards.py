@@ -75,7 +75,7 @@ _FIELDS = (
     "space", "eval_profile", "eval_timeout", "concept_tags", "priority", "pinned",
     "foresight_rank", "confidence",
     "footprint", "resource_pin", "novelty_verdict", "cross_run_prior", "research_origin", "lesson_refs",
-    "claim_refs", "steering_context", "provenance_tier",
+    "claim_refs", "steering_context", "provenance_tier", "premise_review",
 )
 # Fields a ONE-RUN capability must not carry. `cross_run_prior` names sibling run_ids and their
 # metrics — other runs' identities, which a review-link bearer was never granted (the top-level
@@ -715,7 +715,14 @@ def _public_selection_lifecycle_is_coherent(card, out: dict) -> bool:
 
 
 def _field(card, name: str):
-    return card.get(name, _SKIP) if isinstance(card, dict) else getattr(card, name, _SKIP)
+    value = card.get(name, _SKIP) if isinstance(card, dict) else getattr(card, name, _SKIP)
+    return _SKIP if name == 'premise_review' and value is None else value
+
+
+def _premise_review(value):
+    # Native projection is bounded; a foreign unknown shape must not masquerade as a complete notice.
+    from looplab.core.claim_premises import valid_public_view
+    return value if valid_public_view(value) else _SKIP
 
 
 def _field_value(card, name: str):
@@ -1075,6 +1082,7 @@ _FIELD_KINDS: dict[str, _FieldKind] = {
     "cross_run_prior": _FieldKind(_cross_run, _cross_run_lossless),
     "concept_source": _FieldKind(_card_concept_source, _concept_source_lossless),
     "steering_context": _FieldKind(_steering, _steering_lossless),
+    "premise_review": _FieldKind(_premise_review, lambda raw, bounded: _premise_review(raw) is not _SKIP and raw == bounded),
 }
 
 

@@ -1025,3 +1025,40 @@ def echo_replay_summary(events, state) -> int:
         typer.echo("best: none selected")
     typer.echo("the full state: looplab replay RUN_DIR (JSON); the account: looplab inspect RUN_DIR")
     return 0
+
+
+def echo_policy_replay(run_dir, *, policy, n_seeds, max_attempts):
+    """Read-only fixed-tape diagnostic rendering, outside command registration."""
+    import orjson
+    from looplab.search.policy_replay import read_source, replay_policy
+    try:
+        events, source = read_source(run_dir / "events.jsonl")
+        result = replay_policy(events, policy=policy, n_seeds=n_seeds, max_attempts=max_attempts)
+    except (ValueError, OSError) as exc:
+        typer.echo(f"cannot replay policy: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    result["source"] = source
+    typer.echo(orjson.dumps(result, option=orjson.OPT_INDENT_2).decode())
+
+
+def echo_proxy_accuracy(report):
+    """Print the existing measured-coverage and selection-bias clauses verbatim."""
+    typer.echo(f"proxy scored {report['scored']} candidate(s); {report['evaluated']} of them were "
+               f"evaluated and can be checked; {report['killed']} were KILLED "
+               f"(`proxy_skipped`), {report['unscored']} node(s) carry no proxy score")
+    if report["accuracy"] is None:
+        typer.echo("pairwise accuracy: NOT MEASURABLE — no pair of scored nodes came back with "
+                   "different metrics. This is not 0 %, and it is not evidence the proxy works.")
+        return
+    typer.echo(f"pairwise accuracy: {100 * report['accuracy']:.1f}% "
+               f"({report['concordant']} of {report['pairs']} ordered pairs"
+               + (f"; {report['tied_predictions']} pair(s) the proxy scored EQUAL, which offer the "
+                  "kill no ordering at all" if report["tied_predictions"] else "") + ")")
+    typer.echo("  measured over the candidates the proxy LET THROUGH: a killed node has no metric, "
+               "so the kill's own error rate is not in this number"
+               + (f" (except {report['killed_evaluated']} killed node(s) that were evaluated anyway "
+                  "— the only counterfactual this run holds)" if report["killed_evaluated"] else "."))
+    if report["accuracy"] < 0.6 and report["killed"]:
+        typer.echo("  BELOW THE FIELD'S OWN BAR (predict-before-execute reports 61.5 % pairwise) "
+                   "while this run let it kill: `proxy_kill_fraction=0` turns the kill off and "
+                   "keeps the score as an audit signal.")

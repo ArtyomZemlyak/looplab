@@ -1765,6 +1765,7 @@ def _analyze_speculation_run(run_dir: str | Path) -> tuple[dict[str, Any], dict[
     from looplab.search.speculation_calibration import (
         SPECULATION_CALIBRATION_PROFILE_DIGEST,
         SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+        SPECULATION_CALIBRATION_RETIRED_IDENTITY_FIELDS,
     )
     # Compare against the DOCUMENT the snapshot writer actually emits, not the raw Settings field
     # set: `masked_snapshot()` pops credential bindings and stamps `config_snapshot_schema`, so the
@@ -1800,12 +1801,13 @@ def _analyze_speculation_run(run_dir: str | Path) -> tuple[dict[str, Any], dict[
     #     direction `core/config.py::settings_from_snapshot(refuse_unknown=True)` takes on resume,
     #     finalize and Replay — since review 2026-09-22 (CORE-03); before it that function refused
     #     only a newer FORMAT, and this sentence was false. Those paths also grandfather
-    #     `RETIRED_SETTINGS`; this exactness check does not.
+    #     `RETIRED_SETTINGS`; this calibration check accepts only its reserved v1 no-op slot.
     # A field this binary declares that an OLDER snapshot predates is absent-and-fine, which is the
     # whole of the change.
     known_config_fields = (
         set(SPECULATION_CALIBRATION_SNAPSHOT_FIELDS)
         | set(SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS)
+        | set(SPECULATION_CALIBRATION_RETIRED_IDENTITY_FIELDS)
     )
     required_config_fields = (
         set(SPECULATION_CALIBRATION_PROFILE_SETTINGS)
@@ -1828,6 +1830,12 @@ def _analyze_speculation_run(run_dir: str | Path) -> tuple[dict[str, Any], dict[
             f"config fields differ from the exact calibration snapshot "
             f"(missing={missing}, extra={unknown})"
         )
+    # The sole retired no-op accepted by this protocol was pinned False in v1. Preserve an
+    # original snapshot including it; new writers omit it. Never rewrite the runtime-scope hash
+    # or grandfather arbitrary retired/future fields into calibration evidence.
+    for key, expected in SPECULATION_CALIBRATION_RETIRED_IDENTITY_FIELDS.items():
+        if key in config and (type(config[key]) is not bool or config[key] is not expected):
+            raise ValueError(f"config.{key} differs from the retired v1 identity slot")
     if config.get("speculation_gate_receipt") is not None:
         raise ValueError("config.speculation_gate_receipt must be null in fresh calibration evidence")
     max_nodes = config.get("max_nodes")

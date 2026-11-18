@@ -814,6 +814,9 @@ class RunResult:
     # it reads `diverged`, so "a node whose gates were never evaluated is never salvaged" is a
     # property of the RESULT and not of whichever label the classifier happened to reach for.
     gate_readers_refused: bool = False
+    # Optional remote CPU receipt, absent for every local sandbox. Appended to preserve positional
+    # RunResult callers; native claim/settle and terminal retain the immutable placement evidence.
+    executor_receipt: Optional[dict] = None
 
 
 # Distinctive sentinels in the killed stage's stderr, so command_eval/the orchestrator (and run_argv's
@@ -2337,11 +2340,16 @@ class DockerSandbox:
 
 
 def make_sandbox(trust_mode: str = "trusted_local", *, image: Optional[str] = None,
-                 mem_local: str = "", fsize_local: str = "", **kwargs) -> Sandbox:
+                 mem_local: str = "", fsize_local: str = "", cluster_executor=None, **kwargs) -> Sandbox:
     """Select the sandbox tier from the trust mode (ADR-13). `image` is routed only to the
     Docker tier (the subprocess tier ignores it); `mem_local`/`fsize_local` (human sizes like "8g")
     are the trusted-local RLIMIT_AS host-OOM and RLIMIT_FSIZE disk-fill caps, routed only to the
     subprocess tier."""
+    if cluster_executor is not None:
+        if trust_mode != 'trusted_local' or mem_local or fsize_local:
+            raise ConfigRefusal('cluster executor is a trusted CPU transport; local Docker/rlimit options cannot silently describe its placement')
+        from looplab.runtime.cluster import ClusterSandbox
+        return ClusterSandbox(cluster_executor)
     if trust_mode == "trusted_local":
         return SubprocessSandbox(mem_bytes=parse_mem_bytes(mem_local),
                                  fsize_bytes=parse_mem_bytes(fsize_local), **kwargs)

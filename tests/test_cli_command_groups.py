@@ -38,7 +38,7 @@ GROUPS = {
     # at, rebuilt by the same `fold` `replay` prints: it appends no event, spends no money, touches
     # no cross-run store, and nothing in `looplab/` ever reads the file back. The group docstring
     # carries that exception explicitly rather than letting "read-only" quietly become false.
-    "inspect_cmds": {"replay", "speculation-gate", "timings", "inspect", "readmodel", "tensorboard",
+    "inspect_cmds": {"replay", "policy-replay", "speculation-gate", "timings", "inspect", "readmodel", "tensorboard",
                      # `stage-dups` is run diagnostics in the strictest sense: it folds nothing but
                      # this run's own `stage_finished` rows, calls no model, writes nothing, and
                      # reads no cross-run store. It sits beside `timings` because it answers the

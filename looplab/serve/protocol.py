@@ -49,13 +49,15 @@ Protocols named here:
 """
 from __future__ import annotations
 
+from looplab.events.types import EV_CLAIM_REVIEWED
+
 import math
 from enum import Enum
 from typing import Optional
 
 from looplab.events.types import (
     PAUSE_REASON_EXTERNAL_OBLIGATIONS,
-    EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
+    EV_AGENT_CHECKPOINTED, EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
     EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_FILED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
     EV_CARD_RESOURCE_PINNED, EV_COMMAND_ACK,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_EDGE,
@@ -377,6 +379,7 @@ def waits_for_resume(record, stop_holds: bool, *, own_launch_over: bool = False,
 
 
 CONTROL_EVENTS = frozenset({
+    EV_CLAIM_REVIEWED,
     EV_RUN_ABORT, EV_PAUSE, EV_RESTART, EV_RESUME, EV_NODE_ABORT, EV_NODE_RESET, EV_BUDGET_EXTEND, EV_HINT,
     EV_FORCE_CONFIRM, EV_FORCE_ABLATE, EV_FORK, EV_ANNOTATION, EV_PROMOTE,
     EV_APPROVAL_GRANTED, EV_SPEC_APPROVED, EV_INJECT_NODE, EV_RUN_REOPENED,
@@ -387,7 +390,7 @@ CONTROL_EVENTS = frozenset({
     EV_DEEP_RESEARCH,  # P2: operator asks the engine to run the Deep-Research stage now
     # The same projections as the built-in research/report writers. The command intake binds
     # provenance and sanitizes content; an external agent never appends an event directly.
-    EV_RESEARCH_COMPLETED, EV_REPORT_GENERATED,
+    EV_RESEARCH_COMPLETED, EV_REPORT_GENERATED, EV_AGENT_CHECKPOINTED,
     EV_HYPOTHESIS_ADDED,    # P1: a human registers a hypothesis on the board (open question to test)
     EV_HYPOTHESIS_UPDATED,  # P1: a human abandons a hypothesis line (status=abandoned)
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
@@ -415,6 +418,7 @@ CONTROL_EVENTS = frozenset({
 # HTTP control payloads are strict contracts, not arbitrary event bags. Unknown keys are dangerous:
 # replay ignores many of them, so a caller could persist `{secret: ...}` and receive false success.
 CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
+    EV_AGENT_CHECKPOINTED: frozenset({"external_work_state", "external_telemetry", "work_intents"}),
     EV_RUN_ABORT: frozenset({"reason"}),
     # `reason` (doc 82 П5): the operator's or agent's own words for a stop or a resume, shown in
     # the run's history; an engine reason code is refused (`control_validation.py`).
@@ -423,11 +427,11 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_RESUME: frozenset({"reason"}),
     EV_RUN_REOPENED: frozenset(),
     EV_NODE_ABORT: frozenset({"node_id", "generation", "reason"}),
-    EV_NODE_RESET: frozenset({"node_id", "generation", "from_stage"}),
+    EV_NODE_RESET: frozenset({"node_id", "generation", "from_stage", "resume_inputs"}),
     EV_BUDGET_EXTEND: frozenset(
         {"add_nodes", "max_seconds", "max_eval_seconds", "timeout", "eval_timeout",
          "eval_parallel", "llm_parallel", "max_parallel", "parallel_build"}),
-    EV_HINT: frozenset({"text", "replace"}),
+    EV_HINT: frozenset({"text", "replace", "directive_id", "topic", "status", "supersedes", "review_nomination"}),
     EV_SET_STRATEGY: frozenset({"strategy"}),
     EV_METRIC_RETARGET: frozenset({"key", "direction", "goal"}),
     EV_TRACK_REQUESTED: frozenset({"track", "node_ids"}),
@@ -446,7 +450,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
         # An ARTIFACT node (doc 73 §1.4): `node_kind: "artifact"` succeeds on a clean pipeline with no
         # metric and is never ranked; `uses` names produced nodes whose workdirs this node's
         # eval reads (`LOOPLAB_USES_WORKDIRS`).
-        "node_kind", "uses", "job_role",
+        "node_kind", "uses", "job_role", "expected_evaluator_digest",
         "source_run", "source_node",
         # Doc 79: `{"worktree": name}`, `{"patch": text, "start"?}` or `{"git": {"repo", "ref"}}` (a
         # foreign branch merged onto the run's base, `engine/code_foreign.py`) — an external agent's
@@ -474,6 +478,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_PROMOTE: frozenset({"node_id", "generation", "alias"}),
     EV_HYPOTHESIS_ADDED: frozenset({"id", "statement", "source", "concepts"}),
     EV_HYPOTHESIS_UPDATED: frozenset({"id", "status"}),
+    EV_CLAIM_REVIEWED: frozenset({"id", "premise_ids", "assessment"}),
     # Provenance is deliberately absent: normalize_control stamps operator authority after validating
     # the exact current Card and rejects attempts to forge source/dropped_by/pinned.
     EV_CARD_REPRIORITIZED: frozenset({"id", "priority"}),
@@ -488,6 +493,8 @@ assert set(CONTROL_DATA_FIELDS) == set(CONTROL_EVENTS), "every control event nee
 # normalizers derive them from the folded run; accepting them from an agent would let it forge
 # a paid internal research attempt or a report's publication trigger.
 CONTROL_SERVER_DERIVED_FIELDS: dict[str, frozenset[str]] = {
+    EV_CLAIM_REVIEWED: frozenset({"review", "actor_kind"}),
+    EV_AGENT_CHECKPOINTED: frozenset({"label", "plan", "plan_updates", "todos", "turn"}),
     EV_RESEARCH_COMPLETED: frozenset({"at_node", "served_manual", "trigger"}),
     EV_REPORT_GENERATED: frozenset({"at_node", "trigger"}),
     # A declared edge is always `mode: authored`; the server says so, the author cannot.
@@ -574,6 +581,10 @@ COLLABORATION_EVENTS = frozenset({
     # A declared concept edge is a run-level authored claim like the base set above.
     EV_CONCEPT_EDGE,
 })
+
+# Subject-sensitive appends share tail-CAS even when their admission is not collaboration-only.
+# Hints retain cold-start quarantine and active-command fencing; only publication gains a recheck.
+SEMANTIC_CAS_EVENTS = COLLABORATION_EVENTS | frozenset({EV_HINT, EV_CLAIM_REVIEWED})
 
 POLL_SECONDS = 0.4   # SSE tail cadence — fast enough to feel live, light on the disk
 

@@ -1599,7 +1599,8 @@ class CardReservationMixin:
 
     def _stage_prepared_card(self, action: dict, idea: Idea, *, proposal_state: RunState,
                              proposal_node_ceiling: int, at_node: int, source: str,
-                             steering_context=(), cross_run_receipt=None) -> Optional[str]:
+                             steering_context=(), cross_run_receipt=None,
+                             audit_events=()) -> Optional[str]:
         """Commit one concrete proposal as a ready Card, without reserving a Node.
 
         Layer 5 needs durable inventory *before* it can elect a request-driven producer.  Proposal is
@@ -1749,11 +1750,22 @@ class CardReservationMixin:
             if plan.disposition == "reuse":
                 # Reuse mutates nothing.  Its eventual request/claim always re-folds and revalidates
                 # the Card, so it needs no writer lock or synthetic event merely to stabilize the tail.
+                # Its existing Card is already committed; record only this repeated paid proposal.
+                self._publish_proposal_events(audit_events)
                 return plan.card_id
             if plan.disposition != "mint" or plan.card_id is None or plan.payload is None:
                 return None
+            # Decode outside the id allocator lock; it protects only the final tail-CAS append.
+            records, contexts = self._proposal_event_records(audit_events)
+            if records:
+                from looplab.core.tracing import current_ids
+                records.insert(0, (EV_CARD_ADDED, plan.payload))
+                contexts.insert(0, current_ids())
             with self._id_lock:
-                self.store.append(EV_CARD_ADDED, plan.payload, expected_last_seq=tail)
+                if records:
+                    self.store.append_many(records, record_contexts=contexts, expected_last_seq=tail)
+                else:
+                    self.store.append(EV_CARD_ADDED, plan.payload, expected_last_seq=tail)
             return plan.card_id
 
         # Nothing was staged, so the Card simply does not exist yet; the next proposal turn re-plans it.

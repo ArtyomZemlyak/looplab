@@ -146,6 +146,51 @@ def test_submit_experiment_preregisters_files_and_injects_in_one_call(tmp_path, 
     assert len(store.read_all()) == count
 
 
+def test_late_decision_correction_replays_immutable_registration_and_question(tmp_path, monkeypatch):
+    """A rejected late step has no receipt; accepted earlier steps retain their exact payload."""
+    _, rd, store, api, server, spawns = _setup(tmp_path, monkeypatch)
+    snapshot = rd / "config.snapshot.json"
+    settings = json.loads(snapshot.read_text())
+    settings.update(foresight=True, foresight_panel=2)
+    snapshot.write_text(json.dumps(settings))
+    generation = run_generation_token(store.read_all())
+    args = dict(key="late-review", idea={"operator": "improve", "rationale": "move x"},
+                code="print(3)", experiment=EXPERIMENT,
+                experiment_reason="registered before the review",
+                research_question={"id": "q-late", "statement": "Does x improve?"})
+    first = composite.submit_experiment(
+        api, "camp", generation, **args, decisions={"foresight": {"reason": "reviewed"}})
+    assert first["stopped_at"] == "decision:foresight", first
+    assert first["steps"][-1]["status"] == 400
+    assert "2 distinct reviewed option" in first["steps"][-1]["detail"]
+    amendment_bytes = (rd / "protocol_amendments.jsonl").read_bytes()
+    assert len([e for e in store.read_all() if e.type == "hypothesis_added"]) == 1
+    assert "inject_node" not in _types(store)
+
+    # Changing an accepted registration while repairing a later step MUST still conflict.
+    decisions = {"foresight": {"reason": "reviewed", "alternatives": [
+        {"operator": "improve", "rationale": "try x=2 instead"}]}}
+    changed = composite.submit_experiment(api, "camp", generation,
+        **{**args, "experiment": {**EXPERIMENT, "notes": "different accepted content"}},
+        decisions=decisions)
+    assert changed["stopped_at"] == "register_experiment", changed
+    assert changed["steps"][-1]["status"] == 409
+    assert "EXACT original payload" in changed["message"]
+    assert (rd / "protocol_amendments.jsonl").read_bytes() == amendment_bytes
+
+    fixed = composite.submit_experiment(api, "camp", generation, **args, decisions=decisions)
+    assert fixed["ok"], fixed
+    assert fixed["steps"][1]["replayed"] is True
+    assert (rd / "protocol_amendments.jsonl").read_bytes() == amendment_bytes
+    assert _types(store).count("hypothesis_added") == 1
+    assert _types(store).count("inject_node") == 1
+    assert spawns == []
+    count = len(store.read_all())
+    replay = composite.submit_experiment(api, "camp", generation, **args, decisions=decisions)
+    assert replay["ok"], replay
+    assert len(store.read_all()) == count
+
+
 def test_retry_node_is_a_new_attempt_of_the_same_node(tmp_path, monkeypatch):
     root, rd, store, api, server, spawns = _setup(tmp_path, monkeypatch)
     generation = run_generation_token(store.read_all())

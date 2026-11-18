@@ -71,6 +71,18 @@ def replay(run_dir: Path = typer.Argument(...),
                             option=orjson.OPT_INDENT_2).decode())
 
 
+@app.command(name="policy-replay")
+def policy_replay(
+    run_dir: Path = typer.Argument(...),
+    policy: str = typer.Option("greedy", "--policy", help="greedy, mcts or evolutionary; current pure defaults."),
+    n_seeds: int = typer.Option(3, "--n-seeds", min=1, max=1000),
+    max_attempts: Optional[int] = typer.Option(None, "--max-attempts", min=1, max=1000),
+):
+    """Replay supported policy choices on a fixed recorded tree; no model or execution."""
+    from looplab.cli.run_report import echo_policy_replay
+    echo_policy_replay(run_dir, policy=policy, n_seeds=n_seeds, max_attempts=max_attempts)
+
+
 @app.command(name="speculation-gate")
 def speculation_gate(
     run_dirs: list[Path] = typer.Argument(
@@ -508,6 +520,9 @@ def inspect(
         # summary states the UNKNOWN bucket first for exactly that reason — every log written before
         # 2026-08-19, which is every log on this box, lands there and must not read as clean.
         typer.echo(trust_scan_summary(all_events, [n.id for n in state.evaluated_nodes()]))
+        from looplab.core.metric_behavior import metric_behavior_summary
+        if observation := metric_behavior_summary(state):
+            typer.echo(observation)
         # WHAT THIS RUN'S BEST NUMBER MAY BE RANKED AGAINST. `_print_result` above prints
         # "BEST node N: metric=…" and, until 2026-08-20, nothing whatsoever about what that number
         # was measured against — which is how four recall@100 values from more than one test set came
@@ -1073,25 +1088,8 @@ def proxy_accuracy(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
     store = _require_run_dir(run_dir)
     _echo_log_integrity(store, run_dir)
     report = pairwise_accuracy(fold(store.read_all()))
-    typer.echo(f"proxy scored {report['scored']} candidate(s); {report['evaluated']} of them were "
-               f"evaluated and can be checked; {report['killed']} were KILLED "
-               f"(`proxy_skipped`), {report['unscored']} node(s) carry no proxy score")
-    if report["accuracy"] is None:
-        typer.echo("pairwise accuracy: NOT MEASURABLE — no pair of scored nodes came back with "
-                   "different metrics. This is not 0 %, and it is not evidence the proxy works.")
-        return
-    typer.echo(f"pairwise accuracy: {100 * report['accuracy']:.1f}% "
-               f"({report['concordant']} of {report['pairs']} ordered pairs"
-               + (f"; {report['tied_predictions']} pair(s) the proxy scored EQUAL, which offer the "
-                  "kill no ordering at all" if report["tied_predictions"] else "") + ")")
-    typer.echo("  measured over the candidates the proxy LET THROUGH: a killed node has no metric, "
-               "so the kill's own error rate is not in this number"
-               + (f" (except {report['killed_evaluated']} killed node(s) that were evaluated anyway "
-                  "— the only counterfactual this run holds)" if report["killed_evaluated"] else "."))
-    if report["accuracy"] < 0.6 and report["killed"]:
-        typer.echo("  BELOW THE FIELD'S OWN BAR (predict-before-execute reports 61.5 % pairwise) "
-                   "while this run let it kill: `proxy_kill_fraction=0` turns the kill off and "
-                   "keeps the score as an audit signal.")
+    from looplab.cli.run_report import echo_proxy_accuracy
+    echo_proxy_accuracy(report)
 
 
 @app.command(name="seed-distance")

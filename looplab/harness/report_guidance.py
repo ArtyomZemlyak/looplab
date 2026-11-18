@@ -96,16 +96,22 @@ def snapshot(rd: Path, generation: str, *, root: Path | None = None) -> dict:
             if seq not in report_seqs:
                 warnings.append({'code': 'invalid_report_reference', 'report_seq': seq,
                                  'action': 'Use event sequence numbers of existing report_generated versions, not node IDs.'})
-    from looplab.harness.research_quality import report_fields_empty
+    from looplab.harness.research_quality import report_fields_empty, report_metric_status, report_repetition
     current_report = state.report if isinstance(state.report, dict) else None
     empty_fields = report_fields_empty(current_report) if current_report else []
+    metric_status = report_metric_status(current_report) if current_report else None
+    repetition = report_repetition(current_report) if current_report else None
     if current_report:
         warnings.extend({'code': 'report_field_empty', 'field': field,
                          'action': 'Review the saved current report and fill or explain non-applicability; see the canonical workflow.'}
-                        for field in empty_fields)
+                        for field in empty_fields if field != 'key_metrics' or metric_status['status'] == 'missing')
+        if repetition['status'] == 'substantial_verbatim_overlap':
+            warnings.append({'code': 'overview_body_verbatim_overlap', 'evidence': repetition,
+                             'action': 'Keep cumulative synthesis in the overview and the latest local result in the body. Publish a new version only for a material change; preserve meaningful evidence links.'})
     return {'generation': generation, 'event_seq': events[-1].seq,
             'current_report_seq': current_report.get('published_seq') if current_report else None,
             'report_fields_empty': empty_fields if current_report else None,
+            'report_metric_status': metric_status, 'report_repetition': repetition,
             'instruction': REPORT_INSTRUCTION, 'workflow': GUIDE.replace('{run_id}', quote(canonical_id, safe='')),
             'previous_overview_seq': overview_event.seq if overview_event else None,
             'previous_overview_api': f'{root}/report/versions/{overview_event.seq}' if overview_event else None,

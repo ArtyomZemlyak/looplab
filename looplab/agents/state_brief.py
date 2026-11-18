@@ -21,6 +21,7 @@ import json
 from typing import Optional
 
 from looplab.core.advisory_payloads import memo_snapshot_cue, memo_verdict_cue
+from looplab.agents.board_context import rank_board_context
 from looplab.agents.concept_brief import (CONCEPT_AUTHORING_UNSAFE_LINE,
                                         CONCEPT_AUTHORING_CONTEXT_LINE, drop_concept_authoring)
 from looplab.core.models import (Idea, Node, RunState, card_drift_brief, card_is_direction,
@@ -46,10 +47,11 @@ BOARD_PROMPT_SEED_BUDGET_CHARS = 20_000
 def next_board_prompt_cards(
     state: RunState, hyp_order: Optional[list[str]] = None, *, attempt: int = 0,
 ) -> list:
-    """A fair, whole-item Card window (5 Cards / 20k chars), never a card `cards_being_built`."""
+    """A whole-item bounded Card window, excluding current builds, with explicit coverage."""
     cards = [c for c in state.open_research_beliefs() if c.id not in state.cards_being_built()]
     if not cards:
         return []
+    context_position = None
     if hyp_order:
         position = {card_id: index for index, card_id in enumerate(hyp_order)}
         cards.sort(key=lambda card: (position.get(card.id, len(position)), card.id))
@@ -62,14 +64,30 @@ def next_board_prompt_cards(
             offset = attempt % len(tail)
             cards = leaders + tail[offset:] + tail[:offset]
     elif len(cards) > 1:
-        offset = attempt % len(cards)
-        cards = cards[offset:] + cards[:offset]
+        eligible = [card for card in cards if card.seed_statement
+                    and len(card.seed_statement) <= BOARD_SEED_CHARS_MAX
+                    and len(card.seed_statement) + len(state.card_substitution_brief(card)) + len(_premise_cue(card))
+                        <= BOARD_PROMPT_SEED_BUDGET_CHARS]
+        ranked = rank_board_context(state, eligible)
+        if ranked:
+            context_position = {card.id: index for index, card in enumerate(ranked)}
+            # Reserve one whole coverage anchor BEFORE the context leaders spend the character
+            # budget. Then display selected rows in relevance order. On a stable population,
+            # each eligible card owns this anchor once per full attempt cycle, even if large
+            # relevant leaders would otherwise consume every character. No card is truncated.
+            coverage = sorted(eligible, key=lambda card: card.id)
+            anchor = coverage[attempt % len(coverage)]
+            cards = [anchor] + [card for card in ranked if card.id != anchor.id]
+        else:
+            # No lexical context signal: retain the existing insertion-order rotation.
+            offset = attempt % len(cards)
+            cards = cards[offset:] + cards[:offset]
     selected = []
     used = 0
     for card in cards:
         seed = card.seed_statement or ""
         # The row renders its substitution clause too ("" unless a build was substituted).
-        cost = len(seed) + len(state.card_substitution_brief(card))
+        cost = len(seed) + len(state.card_substitution_brief(card)) + len(_premise_cue(card))
         if (not seed or len(seed) > BOARD_SEED_CHARS_MAX
                 or used + cost > BOARD_PROMPT_SEED_BUDGET_CHARS):
             continue
@@ -77,6 +95,8 @@ def next_board_prompt_cards(
         used += cost
         if len(selected) == BOARD_PROMPT_CARDS:
             break
+    if context_position is not None:
+        selected.sort(key=lambda card: context_position[card.id])
     return selected
 
 
@@ -174,7 +194,7 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *, limit: int = BOAR
     for card in reversed(rows):
         seed = card.seed_statement or ""
         cost = len(seed) + len(state.belief_substitution_brief(
-            groups.get(card.belief_id or hypothesis_statement_digest(seed), [card]), card))
+            groups.get(card.belief_id or hypothesis_statement_digest(seed), [card]), card)) + len(_premise_cue(card))
         if len(seed) > BOARD_SEED_CHARS_MAX or used + cost > 8_000:
             continue
         selected.append(card)
@@ -206,6 +226,22 @@ def support_legend(levels) -> str:
     shown = [text for level, text in SUPPORT_LEVEL_TEXT.items() if level in levels]
     return ("SUPPORT, on a supported card, says what the verdict rests on: "
             + "; ".join(shown) + ".")
+
+
+def _premise_cue(card):
+    view = getattr(card, 'premise_review', None)
+    if not view:
+        return ""
+    from looplab.core.claim_premises import valid_public_view
+    if not valid_public_view(view):
+        return " PREMISE_REVIEW=unavailable (not a scientific verdict) "
+    if view.get('state') != 'current':
+        return " PREMISE_REVIEW=" + view['state'] + " (not a scientific verdict) "
+    if view.get('undercut'):
+        return (" PREMISE_UNDERCUT=" + json.dumps([row['premise_id'] for row in view['undercut']])
+                + " (authored premise refutation; child evidence/verdict unchanged) ")
+    uncertain = [row['premise_id'] for row in view.get('premise_status', []) if row['state'] in ('stale', 'unavailable')]
+    return " PREMISE_REVIEW_UNAVAILABLE=" + json.dumps(uncertain) + " " if uncertain else ""
 
 
 def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
@@ -252,8 +288,9 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
         # board by expected payoff (`hyp_order` = hypothesis ids best-first), surface the batch of
         # untested beliefs — which arrives from deep research / a human / the strategist — in that
         # predicted-value order, so the search tests the most promising one first and the [:5] cap now
-        # drops the LOWEST-payoff cards, not arbitrary insertion-order ones. No ranking -> insertion
-        # order (unchanged). Replay-safe: only the resulting node's `idea.hypothesis` is recorded.
+        # drops the LOWEST-payoff cards. Without that prediction, lexical goal/directive relevance
+        # plus whole-card coverage selects the window; absent a lexical signal, insertion rotation
+        # remains. Replay-safe: the resulting node's `idea.hypothesis` is still the durable choice.
         # TWO KINDS OF ROW, TWO DIFFERENT CONTRACTS, and until 2026-08-24 they were one list.
         # `open_research_beliefs()` returns every open untested card, and a card is either an
         # EXPERIMENT (it owns an executable action, so it can be claimed and built) or a
@@ -276,7 +313,7 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
                          + " — these are NOT experiments and cannot be run as they stand):")
             for card in directions:
                 lines.append(
-                    f"- DIRECTION_ID={card.id} "
+                    f"- DIRECTION_ID={card.id} {_premise_cue(card)}"
                     f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
             if for_proposal:
                 lines.append(
@@ -291,7 +328,7 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
                          + " — none has evidence yet):")
             for card in work_items:
                 lines.append(
-                    f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} {state.card_substitution_brief(card)}"
+                    f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} {state.card_substitution_brief(card)}{_premise_cue(card)}"
                     f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
             if for_proposal:
                 # A CLAIM CONTRACT, and only a caller whose answer is an `Idea` can honour it. This brief
@@ -353,6 +390,7 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
         return (f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
                 f"STATUS={state.card_status_now(card)} VERDICT={card.verdict} "
                 + (f"SUPPORT={level} " if level else "")
+                + _premise_cue(card)
                 + f"NODES={nodes} "
                 + (f"{drift} " if drift else "")
                 + f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
@@ -619,4 +657,6 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
                          + " — " + str(row.get("summary", ""))[:250])
     lines.extend(board_prompt_lines(state, hyp_order, board_cards, for_proposal=for_proposal,
                                     fit=fit, support=verdict_support))
+    from looplab.core.metric_behavior import metric_behavior_summary
+    lines.append(metric_behavior_summary(state))
     return "\n".join(line for line in lines if line)

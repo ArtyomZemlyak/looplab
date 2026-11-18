@@ -56,7 +56,7 @@ def test_the_row_is_diagnostic_and_declares_what_it_carries():
     contract = EVENT_PAYLOAD_KEYS[EV_EVAL_ATTEMPT_WITHHELD]
     assert set(contract.required) == {"at", "attempt", "eval_seconds", "generation", "node_id",
                                       "reason"}
-    assert EVAL_WITHHELD_POINTS == ("admit", "before_launch", "after_canary", "decide_repair")
+    assert EVAL_WITHHELD_POINTS == ("admit", "before_launch", "after_canary", "decide_repair", "executor_reconcile")
 
 
 # ------------------------------------------------------------------ the four withhold points, driven

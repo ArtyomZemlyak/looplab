@@ -11,7 +11,6 @@ cross_run_advisory 1 1700
 cross_run_concepts 1 1559
 cross_run_curation 1 3147
 cross_run_read_tools 1 2738
-cross_run_structured_claims 1 1759
 deep_research_every 1 1619
 developer_crash_pause_after 1 1687
 developer_probe 1 3036

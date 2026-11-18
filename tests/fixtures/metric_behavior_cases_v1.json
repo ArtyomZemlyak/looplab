@@ -1,0 +1,258 @@
+{
+  "schema": 1,
+  "source": "Synthetic native fixture with actual public projection; not scientific outcomes",
+  "state": {
+    "nodes": {
+      "0": {
+        "id": 0,
+        "tombstoned": false,
+        "metric": 1.0,
+        "status": "evaluated",
+        "extra_metrics": {
+          "recall": 1.0,
+          "ndcg": 1.0,
+          "coverage": 1.0,
+          "latency": 1.0
+        },
+        "extra_metrics_provenance": {
+          "recall": "declared",
+          "ndcg": "declared",
+          "coverage": "declared",
+          "latency": "declared"
+        },
+        "extra_metrics_direction": {
+          "recall": "max",
+          "ndcg": "max",
+          "coverage": "max",
+          "latency": "max"
+        },
+        "attempt": 0,
+        "protocol_version": 1
+      },
+      "1": {
+        "id": 1,
+        "tombstoned": false,
+        "metric": 1.0,
+        "status": "evaluated",
+        "extra_metrics": {
+          "recall": 1.0,
+          "ndcg": 1.0,
+          "coverage": 1.0,
+          "latency": 1.0
+        },
+        "extra_metrics_provenance": {
+          "recall": "declared",
+          "ndcg": "declared",
+          "coverage": "declared",
+          "latency": "declared"
+        },
+        "extra_metrics_direction": {
+          "recall": "max",
+          "ndcg": "max",
+          "coverage": "max",
+          "latency": "max"
+        },
+        "attempt": 0,
+        "protocol_version": 1
+      },
+      "2": {
+        "id": 2,
+        "tombstoned": false,
+        "metric": 1.0,
+        "status": "evaluated",
+        "extra_metrics": {
+          "recall": 1.0,
+          "ndcg": 1.0,
+          "coverage": 1.0,
+          "latency": 1.0
+        },
+        "extra_metrics_provenance": {
+          "recall": "declared",
+          "ndcg": "declared",
+          "coverage": "declared",
+          "latency": "declared"
+        },
+        "extra_metrics_direction": {
+          "recall": "max",
+          "ndcg": "max",
+          "coverage": "max",
+          "latency": "max"
+        },
+        "attempt": 0,
+        "protocol_version": 1
+      },
+      "3": {
+        "id": 3,
+        "tombstoned": false,
+        "metric": 2.0,
+        "status": "evaluated",
+        "extra_metrics": {
+          "recall": 2.13,
+          "ndcg": 0.15,
+          "coverage": 0.18,
+          "latency": 1.0
+        },
+        "extra_metrics_provenance": {
+          "recall": "declared",
+          "ndcg": "declared",
+          "coverage": "declared",
+          "latency": "declared"
+        },
+        "extra_metrics_direction": {
+          "recall": "max",
+          "ndcg": "max",
+          "coverage": "max",
+          "latency": "max"
+        },
+        "attempt": 0,
+        "protocol_version": 1
+      }
+    },
+    "metric_behavior_scans": {
+      "3": {
+        "version": 1,
+        "node_id": 3,
+        "generation": 0,
+        "detector": "metric_regime_shift",
+        "subject": {
+          "node_id": 3,
+          "attempt": 0,
+          "terminal_event_seq": 8,
+          "protocol_version": 1,
+          "metric": 2.0,
+          "feasible": true,
+          "declared_metric_count": 4,
+          "observation_digest": "553db99c4c7e092dd5189b0dbc287aa99097c18c5152406a87fb017528511012"
+        },
+        "parameters": {
+          "reference_window": 32,
+          "min_references": 3,
+          "min_common_metrics": 3,
+          "ratio_bound": 2.0,
+          "shift_fraction": 0.25
+        },
+        "references": [
+          {
+            "node_id": 0,
+            "attempt": 0,
+            "terminal_event_seq": 2,
+            "protocol_version": 1,
+            "metric": 1.0,
+            "feasible": true,
+            "declared_metric_count": 4,
+            "observation_digest": "8c98ed88b8a372c7b4ea785f8bb1c9a4df69f4c374e73c906044dc39142894d0"
+          },
+          {
+            "node_id": 1,
+            "attempt": 0,
+            "terminal_event_seq": 4,
+            "protocol_version": 1,
+            "metric": 1.0,
+            "feasible": true,
+            "declared_metric_count": 4,
+            "observation_digest": "1d92963bfac6c717e8d173e6d5d00b71ba1eaf2981238dcf1d65437b673a1024"
+          },
+          {
+            "node_id": 2,
+            "attempt": 0,
+            "terminal_event_seq": 6,
+            "protocol_version": 1,
+            "metric": 1.0,
+            "feasible": true,
+            "declared_metric_count": 4,
+            "observation_digest": "52ce9b3f4426af9f0a84ca83ee93941e0ca16770e254420759ab06486ef2de1f"
+          }
+        ],
+        "checked_metrics": 4,
+        "shifted_metrics": 3,
+        "strongest_shifts": [
+          {
+            "metric_name": "ndcg",
+            "value": 0.15,
+            "reference_median": 1.0,
+            "ratio": 0.15,
+            "reference_count": 3,
+            "direction": "max",
+            "channel": "declared",
+            "reference_values": [
+              {
+                "node_id": 0,
+                "attempt": 0,
+                "value": 1.0
+              },
+              {
+                "node_id": 1,
+                "attempt": 0,
+                "value": 1.0
+              },
+              {
+                "node_id": 2,
+                "attempt": 0,
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "metric_name": "coverage",
+            "value": 0.18,
+            "reference_median": 1.0,
+            "ratio": 0.18,
+            "reference_count": 3,
+            "direction": "max",
+            "channel": "declared",
+            "reference_values": [
+              {
+                "node_id": 0,
+                "attempt": 0,
+                "value": 1.0
+              },
+              {
+                "node_id": 1,
+                "attempt": 0,
+                "value": 1.0
+              },
+              {
+                "node_id": 2,
+                "attempt": 0,
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "metric_name": "recall",
+            "value": 2.13,
+            "reference_median": 1.0,
+            "ratio": 2.13,
+            "reference_count": 3,
+            "direction": "max",
+            "channel": "declared",
+            "reference_values": [
+              {
+                "node_id": 0,
+                "attempt": 0,
+                "value": 1.0
+              },
+              {
+                "node_id": 1,
+                "attempt": 0,
+                "value": 1.0
+              },
+              {
+                "node_id": 2,
+                "attempt": 0,
+                "value": 1.0
+              }
+            ]
+          }
+        ],
+        "status": "regime_shift",
+        "authority": "advisory_observation_only",
+        "question": "Do these co-metric changes match the intended objective, or did the population, target or evaluator change?",
+        "limits": "Uncalibrated numerical heuristic over declared native scalar readers; no causal, cheating, faithfulness or quality verdict. Missing or self-reported metrics are not treated as checked.",
+        "evidence_digest": "d66f811420d32e044592f1df70dc63c8aa9c5b5929ad826a97da152a8d064273",
+        "is_current": true
+      }
+    },
+    "aborted_nodes": []
+  }
+}

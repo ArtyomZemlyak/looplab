@@ -3753,3 +3753,5 @@ def derive_cards(
                         excluded=frozenset(st.breed_excluded or ()),
                         aborted=frozenset(st.aborted_nodes or ()))
     _publish_visible_cards(st, ledger, control_ids)
+    from looplab.core.claim_premises import apply_undercut
+    apply_undercut(st)

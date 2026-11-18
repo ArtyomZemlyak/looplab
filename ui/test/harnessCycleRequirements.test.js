@@ -119,3 +119,37 @@ test('incomplete full envelopes and inconsistent pages are unavailable, not empt
     assert.ok(globalThis.fetch.calls.every(row => row.method === 'GET'))
   } finally { await harness.close() }
 })
+
+
+test('completed monitor observations stay visible without a forged answer or actionable checkpoint', async () => {
+  const harness = await mountLive({ visible: true })
+  try {
+    const { HarnessProgressPanel } = await harness.load('/src/HarnessProgressPanel.jsx')
+    const { validHarnessProgress } = await harness.load('/src/harnessProgressModel.js')
+    const closure = { type: 'closure', disposition: 'ended_before_decision', review_status: 'unreviewed',
+      answerer: 'engine', reason: 'Evaluator returned before review.' }
+    const row = { question, answer: null, closure, status: 'ended_before_decision', review_status: 'unreviewed',
+      execution_timing: { evaluator_return_seconds: 2, post_evaluator_seconds: .1,
+        advisory_review: 'recorded', resource_occupancy: 'not_measured' } }
+    const payload = { ...progress('en'), pending_checkpoint_count: 0, pending_checkpoints: [],
+      unreviewed_monitor_count: 1, unreviewed_monitor_observations: [row], unreviewed_monitor_truncated: false,
+      history: { ...progress('en').history, checkpoints: { total: 1, offset: 0, limit: 20,
+        items: [row], has_more: false } } }
+    assert.ok(validHarnessProgress(payload))
+    for (const changed of [{ ...row, closure: null }, { ...row, answer: { verdict: 'continue' } },
+      { ...row, closure: { ...closure, review_status: 'healthy' } }]) {
+      assert.equal(validHarnessProgress({ ...payload, history: { ...payload.history,
+        checkpoints: { ...payload.history.checkpoints, items: [changed] } } }), false)
+    }
+    globalThis.fetch = fetchStub({ '/api/runs/demo/harness-progress': () => payload })
+    const view = await harness.mount(HarnessProgressPanel, { runId: 'demo', expectedGeneration: generation,
+      seq: 12, externalMode: true, configStatus: 'ready' })
+    await until(() => view.container.textContent.includes('command ended; review unresolved'), 'unresolved history')
+    assert.match(view.container.textContent, /Completed commands with unresolved observations: 1/)
+    assert.match(view.container.textContent, /This observation has no review verdict/)
+    assert.match(view.container.textContent, /Evaluator wall time: 2s/)
+    assert.match(view.container.textContent, /Resource occupancy was not measured/)
+    assert.match(view.container.textContent, /original measured log/)
+    assert.ok(globalThis.fetch.calls.every(row => row.method === 'GET'))
+  } finally { await harness.close() }
+})

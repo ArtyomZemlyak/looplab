@@ -545,6 +545,8 @@ class NodeBuildMixin:
         key) keeps the historical rule."""
         return {**({"node_kind": "artifact"} if getattr(node, "kind", None) == "artifact" else {}),
                 **({"job_role": node.job_role} if getattr(node, "job_role", None) is not None else {}),
+                **({"expected_evaluator_digest": node.expected_evaluator_digest}
+                   if getattr(node, "expected_evaluator_digest", None) is not None else {}),
                 **({"uses": list(node.uses)} if getattr(node, "uses", None) else {}),
                 **({"uses_attempts": rebuilt_use_pins(node, state)}
                    if getattr(node, "uses_attempts", None) else {})}
@@ -908,7 +910,8 @@ class NodeBuildMixin:
                            footprint_finalized=_OMIT, speculative=_OMIT,
                            card_build_generation=_OMIT, eval_start_boundary=_OMIT,
                            materialize_aborted_intent=_OMIT, model_arm=_OMIT,
-                           simplified=_OMIT, node_kind=_OMIT, uses=_OMIT,
+                           simplified=_OMIT, node_kind=_OMIT, job_role=_OMIT,
+                           expected_evaluator_digest=_OMIT, uses=_OMIT,
                            uses_attempts=_OMIT, base_selector=_OMIT,
                            expected_last_seq=_OMIT, code_commit=_OMIT) -> None:
         """The single `node_created` emitter for every creation site (`_create_node`,
@@ -938,7 +941,8 @@ class NodeBuildMixin:
                      # doc 67 67.5: `AblationMixin._simplify`'s receipt, and nobody else's.
                      ("simplified", simplified),
                      # doc 73 §1.4: an operator inject's artifact kind and the artifacts it reads.
-                     ("node_kind", node_kind), ("uses", uses),
+                     ("node_kind", node_kind), ("job_role", job_role),
+                     ("expected_evaluator_digest", expected_evaluator_digest), ("uses", uses),
                      # round 3: the producer lifecycle each use is pinned to.
                      ("uses_attempts", uses_attempts),
                      # doc 79 (2026-10-16): an inject's server-stamped agent worktree HEAD, read
@@ -2717,6 +2721,9 @@ class NodeBuildMixin:
                     # doc 73 §1.4, validated by `_normalize_artifact_fields`; OMITTED when absent.
                     **({"node_kind": "artifact"} if req.get("node_kind") == "artifact" else {}),
                     **({"job_role": req["job_role"]} if req.get("job_role") is not None else {}),
+                    **({"expected_evaluator_digest": req["expected_evaluator_digest"]}
+                       if isinstance(req.get("expected_evaluator_digest"), str)
+                       and len(req["expected_evaluator_digest"].strip()) == 64 else {}),
                     **({"uses": [x for x in req["uses"] if type(x) is int]}
                        if isinstance(req.get("uses"), list) and req["uses"] else {}),
                     # …and the producer LIFECYCLE each use was accepted against, server-stamped at

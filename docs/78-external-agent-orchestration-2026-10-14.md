@@ -249,6 +249,10 @@ PUT /api/runs/{run_id}/harness-monitor-rules
 * **A failed evaluation never waits for an advisory answer**: when the evaluated process already
   ended without a measurement, the engine closes its open live questions (`answerer: "engine"`,
   "moot") and writes the terminal at once, and no final-pass question is asked about it.
+* A returned successful evaluator also does not wait for advisory review. Unanswered live observations
+  keep their original evidence and an explicit `ended_before_decision` closure with `unreviewed` status;
+  no agent answer or healthy verdict is fabricated. Progress/history and the UI show those observations
+  separately from active questions. Stage/deadline decisions retain their original authority.
 
 Agent activity: `harness-progress.agent_activity` now carries, beside the read observation,
 `authored_status` / `last_authored_at` / `authored_kind` — the last AUTHORED action of the harness

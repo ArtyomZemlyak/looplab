@@ -27,6 +27,8 @@ observed by both.
 """
 from __future__ import annotations
 
+from looplab.events.types import EV_CLAIM_REVIEWED
+
 import json
 import math
 import os
@@ -54,7 +56,7 @@ from looplab.events.comment_projection import (
     normalize_comment_text)
 from looplab.events.finalize_scope import is_guarded_abort
 from looplab.events.types import (
-    EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
+    EV_AGENT_CHECKPOINTED, EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
     EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_FILED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
     EV_CARD_RESOURCE_PINNED,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_EDGE,
@@ -70,7 +72,7 @@ from looplab.serve.http import refusal
 # its values are persisted on every durable command record (`engine_policy`), and `looplab stop
 # --wait` reads those records to tell whether a command will start an engine after the current one
 # exits — from the CLI, which cannot import this module without the `[ui]` extra (fastapi).
-from looplab.serve.protocol import (COLLABORATION_EVENTS, CONTROL_EVENTS, EnginePolicy,
+from looplab.serve.protocol import (COLLABORATION_EVENTS, SEMANTIC_CAS_EVENTS, CONTROL_EVENTS, EnginePolicy,
                                    CONTROL_DATA_FIELDS, CONTROL_SERVER_DERIVED_FIELDS)
 
 
@@ -100,6 +102,7 @@ class ControlSpec:
     precondition: Optional[Callable[..., Optional[dict]]]
     # (service, rd, event_type, state, alive, pending_finalize) -> (decision, error) or None
     decide: Optional[Callable[..., Optional[tuple]]]
+    unknown_field_note: str = ""
 
 
 _LIFECYCLE_CONTROL_TARGETS = {
@@ -132,10 +135,23 @@ def task_file_for(rd: Path) -> Optional[str]:
     return _resolve_task_file(rd)
 
 
+def _unknown_fields_message(*, scope: str, unknown, allowed, note: str = "") -> str:
+    allowed_sorted = sorted(str(k) for k in allowed)
+    allowed_text = (
+        f"allowed: {', '.join(allowed_sorted)}"
+        if allowed_sorted
+        else "takes no data fields"
+    )
+    if note:
+        allowed_text = f"{allowed_text}; {note}"
+    return f"{scope} has unknown field(s): {', '.join(sorted(str(k) for k in unknown))} ({allowed_text})"
+
+
 def _normalize_finalize_data(data: dict) -> dict:
-    unknown = set(data) - {"reason"}
+    allowed = {"reason"}
+    unknown = set(data) - allowed
     if unknown:
-        raise HTTPException(400, f"run_abort has unknown field(s): {', '.join(sorted(unknown))}")
+        raise HTTPException(400, _unknown_fields_message(scope="run_abort", unknown=unknown, allowed=allowed))
     if "reason" in data and data.get("reason") is None:
         raise HTTPException(400, "run_abort.reason must not be null")
     reason = data.get("reason", "finalized")
@@ -532,10 +548,33 @@ def _normalize_node_reset(ctx: _ControlIntake) -> dict:
     data["from_stage"] = stage
     _normalize_lifecycle_target(ctx)
     from looplab.harness.campaign import optimization_scope_error
-    scope_error = optimization_scope_error(
-        ctx.rd, getattr(ctx.state().nodes[data["node_id"]], "job_role", None))
+    target_node = ctx.state().nodes[data["node_id"]]
+    scope_error = optimization_scope_error(ctx.rd, getattr(target_node, "job_role", None))
     if scope_error is not None:
         raise HTTPException(409, scope_error)
+    if "resume_inputs" in data:
+        from looplab.core.retry_inputs import normalize_resume_inputs, preflight_resume_inputs
+        if data["resume_inputs"] is None:
+            data.pop("resume_inputs", None)
+        else:
+            try:
+                cleaned_inputs = normalize_resume_inputs(data["resume_inputs"])
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from None
+            preflight_err = preflight_resume_inputs(
+                cleaned_inputs,
+                workdir=ctx.rd / "nodes" / f"node_{data['node_id']}",
+                run_dir=ctx.rd,
+                node_id=data["node_id"],
+                current_attempt=target_node.attempt,
+                phase="node_reset",
+            )
+            if preflight_err is not None:
+                raise HTTPException(409, preflight_err)
+            if cleaned_inputs:
+                data["resume_inputs"] = cleaned_inputs
+            else:
+                data.pop("resume_inputs", None)
     return data
 
 
@@ -683,9 +722,91 @@ def _normalize_budget_extend(ctx: _ControlIntake) -> dict:
     return data
 
 
+def _normalize_external_work_state(ctx: _ControlIntake) -> dict:
+    from looplab.core.external_work_state import context_digest, normalize_authored
+    from looplab.harness.snapshot_settings import read_harness_settings
+    if set(ctx.data) == {'work_intents'}:
+        from looplab.core.work_intents import normalize_intents, validate_direction_refs
+        from looplab.events.run_generation import run_generation_token
+        try:
+            intents = normalize_intents(ctx.data['work_intents'])
+            events = ctx.srv.events(ctx.rd)
+            validate_direction_refs(intents, events)
+        except (ValueError, UnicodeError) as exc:
+            raise HTTPException(400, {'code': 'invalid_work_intents',
+                'message': 'Use bounded authored work declarations and exact operator hint references; no execution is authorized.'}) from exc
+        state = ctx.state()
+        if not isinstance(state.run_uid, str) or not state.run_uid:
+            raise HTTPException(409, 'Run incarnation identity is unavailable')
+        return {'label': 'work_intents', 'plan': 'Authored advisory work declarations',
+                'todos': [], 'turn': 0, 'plan_updates': 0, 'work_intents': {
+                    'version': 1, 'run_uid': state.run_uid, 'run_generation': run_generation_token(events),
+                    'context_digest': context_digest(state), 'intents': intents}}
+    if not read_harness_settings(ctx.rd).external_harness:
+        raise HTTPException(409, "Authored external work state requires an external run")
+    if set(ctx.data) == {"external_telemetry"}:
+        from looplab.core.external_telemetry import normalize_authored as normalize_telemetry, revision_id
+        from looplab.events.run_generation import run_generation_token
+        try:
+            receipt = normalize_telemetry(ctx.data["external_telemetry"])
+        except ValueError as exc:
+            raise HTTPException(400, {"code": "invalid_external_telemetry", "message": "Use bounded non-secret revision and delta-usage fields; missing usage is null."}) from exc
+        state = ctx.state()
+        node = state.nodes.get(receipt["node_id"])
+        if node is None or receipt["attempt"] > node.attempt:
+            raise HTTPException(409, "External telemetry requires a recorded node attempt")
+        if not isinstance(state.run_uid, str) or not state.run_uid:
+            raise HTTPException(409, "Run incarnation identity is unavailable")
+        receipt.update(version=1, run_uid=state.run_uid,
+            run_generation=run_generation_token(ctx.srv.events(ctx.rd)), revision_id=revision_id(receipt["revision"]))
+        return {"label": "external_telemetry", "plan": "External harness revision and usage receipt",
+                "todos": [], "turn": 0, "plan_updates": 0, "external_telemetry": receipt}
+    if set(ctx.data) != {"external_work_state"}:
+        raise HTTPException(400, "Submit exactly one checkpoint kind")
+    try:
+        work = normalize_authored(ctx.data.get("external_work_state"))
+        from looplab.core.work_intents import validate_direction_refs
+        validate_direction_refs(work.get('work_intents', []), ctx.srv.events(ctx.rd))
+    except ValueError as exc:
+        raise HTTPException(400, {"code": "invalid_external_work_state", "message": "Use the bounded authored work-state schema; no transcript, reasoning or credentials fields are accepted."}) from exc
+    state = ctx.state()
+    if not isinstance(state.run_uid, str) or not state.run_uid:
+        raise HTTPException(409, "Run incarnation identity is unavailable")
+    from looplab.events.run_generation import run_generation_token
+    generation = run_generation_token(ctx.srv.events(ctx.rd))
+    work.update(version=1, run_uid=state.run_uid, run_generation=generation, context_digest=context_digest(state))
+    return {"label": "external_work_state", "plan": work["goal"], "todos": [], "turn": 0,
+            "plan_updates": 1, "external_work_state": work}
+
+
 def _normalize_hint(ctx: _ControlIntake) -> dict:
     data = ctx.data
-    data["text"] = ctx.text("text")
+    if 'review_nomination' in data:
+        from looplab.serve.report_review import resolve_nomination
+        from looplab.events.run_generation import run_generation_token
+        proof = data['review_nomination']
+        if not isinstance(proof, dict) or set(proof) != {
+                'nomination_id', 'input_digest', 'generation', 'report_seq', 'review_seq'}:
+            raise HTTPException(400, 'invalid report-review nomination reference')
+        try:
+            events = ctx.srv.events(ctx.rd)
+            expected = resolve_nomination(events, ctx.state(), run_generation_token(events),
+                proof['review_seq'], proof['nomination_id'])
+            if any(data.get(key) != value for key, value in expected.items()):
+                raise ValueError('nomination content differs from its saved receipt')
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HTTPException(409, {'code': 'report_review_nomination_stale',
+                'message': 'Read the current report-review receipt and native evidence before nominating.'}) from exc
+    from looplab.core.operator_directions import is_scoped, transition_error
+    if is_scoped(data):
+        data["text"] = ctx.text("text", required=data.get("status", "active") == "active", limit=2000) or ""
+        data.setdefault("status", "active")
+        data.setdefault("supersedes", [])
+        refusal = transition_error(data, ctx.state().operator_direction_ledger)
+        if refusal:
+            raise HTTPException(refusal[0], {"code": refusal[1], "message": "Scoped direction conflicts with its identity or current topic. Read current directions before a new command."})
+    else:
+        data["text"] = ctx.text("text")
     if data.get("replace") is not None and not isinstance(data["replace"], bool):
         raise HTTPException(400, "replace must be a boolean")
     return data
@@ -696,13 +817,14 @@ def _normalize_set_strategy(ctx: _ControlIntake) -> dict:
     strategy = data.get("strategy")
     if not isinstance(strategy, dict) or not strategy:
         raise HTTPException(400, "strategy must be a non-empty JSON object")
-    unknown_strategy = set(strategy) - {
+    allowed_strategy = {
         "policy", "policy_params", "fidelity", "eval_parallel", "llm_parallel",
         "llm_lane_limits", "card_scoring", "developer",
     }
+    unknown_strategy = set(strategy) - allowed_strategy
     if unknown_strategy:
         raise HTTPException(
-            400, f"strategy has unknown field(s): {', '.join(sorted(unknown_strategy))}")
+            400, _unknown_fields_message(scope="strategy", unknown=unknown_strategy, allowed=allowed_strategy))
     from looplab.search.policy import available_policies
     clean_strategy = {}
     policy = strategy.get("policy")
@@ -1089,7 +1211,7 @@ def _normalize_fork_receipt(ctx: _ControlIntake, parents: list, idea: Idea) -> d
     unknown = set(receipt) - _FORK_RECEIPT_CLIENT_FIELDS
     if unknown:
         raise HTTPException(
-            400, f"forked_from has unknown field(s): {', '.join(sorted(unknown))}")
+            400, _unknown_fields_message(scope="forked_from", unknown=unknown, allowed=_FORK_RECEIPT_CLIENT_FIELDS))
     missing = sorted(_FORK_RECEIPT_CLIENT_FIELDS - set(receipt))
     if missing:
         raise HTTPException(400, f"forked_from is missing: {', '.join(missing)}")
@@ -1260,7 +1382,7 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     unknown_inject = set(data) - allowed_inject
     if unknown_inject:
         raise HTTPException(
-            400, f"inject_node has unknown field(s): {', '.join(sorted(unknown_inject))}")
+            400, _unknown_fields_message(scope="inject_node", unknown=unknown_inject, allowed=allowed_inject))
     pre_stages = data.pop("pre_stages", None)
     from looplab.harness.campaign import JOB_ROLES, optimization_scope_error
     if data.get("job_role") is not None and data["job_role"] not in JOB_ROLES:
@@ -1268,15 +1390,32 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     scope_error = optimization_scope_error(ctx.rd, data.get("job_role"))
     if scope_error is not None:
         raise HTTPException(409, scope_error)
+    from looplab.core.evaluator_identity import (
+        evaluator_mismatch_detail, normalize_expected_evaluator_digest,
+    )
+    try:
+        expected_eval = normalize_expected_evaluator_digest(data.get("expected_evaluator_digest"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    if expected_eval is None:
+        data.pop("expected_evaluator_digest", None)
+    else:
+        from looplab.engine.shared import run_dir_evaluator_digest
+        current_eval = run_dir_evaluator_digest(ctx.rd, run_uid=ctx.state().run_uid or None)
+        eval_mismatch = evaluator_mismatch_detail(expected_eval, current_eval)
+        if eval_mismatch is not None:
+            raise HTTPException(409, eval_mismatch)
+        data["expected_evaluator_digest"] = expected_eval
     if data.get("parent_id") is not None and data.get("parent_ids") is not None:
         raise HTTPException(400, "inject_node accepts parent_id or parent_ids, not both")
     _normalize_artifact_fields(ctx)
     idea = data.get("idea")
     if not isinstance(idea, dict) or not idea:
         raise HTTPException(400, "idea must be a non-empty JSON object")
+    allowed_idea = set(Idea.model_fields) - {"node_kind", "uses"}
     unknown_idea = set(idea) - set(Idea.model_fields)
     if unknown_idea:
-        raise HTTPException(400, f"idea has unknown field(s): {', '.join(sorted(unknown_idea))}")
+        raise HTTPException(400, _unknown_fields_message(scope="idea", unknown=unknown_idea, allowed=allowed_idea))
     # `Idea.node_kind`/`Idea.uses` carry a RESEARCHER's artifact proposal (doc 73 §1.4,
     # `agents/artifact_ideas.py`); an inject states them at the TOP LEVEL, where
     # `_normalize_artifact_fields` refuses an unproduced producer. Inside the idea they would skip it.
@@ -1553,6 +1692,27 @@ def _question_concepts(raw) -> list[str]:
     return result
 
 
+def _normalize_claim_reviewed(ctx: _ControlIntake) -> dict:
+    from looplab.core.claim_premises import build_review
+    try:
+        value = build_review(ctx.state(), ctx.data)
+    except (ValueError, TypeError, UnicodeError) as exc:
+        raise HTTPException(400, {'code': 'invalid_claim_review', 'reason': str(exc)}) from exc
+    return {'review': value, 'actor_kind': ctx.actor_kind()}
+
+
+def _precondition_claim_review(state, event_type: str, data: dict, envelope) -> Optional[dict]:
+    from looplab.core.claim_premises import authored_input, build_review, valid_record
+    value = data.get('review')
+    try:
+        if valid_record(value) and build_review(state, authored_input(value)) == value:
+            return None
+    except (ValueError, TypeError, UnicodeError):
+        pass
+    return _error('claim_review_changed', 'Claim, evidence or a prior review changed before publication',
+                  'Read the current native Card and review explicitly; no inference or execution occurred.')
+
+
 def _normalize_hypothesis_added(ctx: _ControlIntake) -> dict:
     data = ctx.data
     data["statement"] = ctx.text("statement", limit=CARD_STATEMENT_MAX_CHARS)
@@ -1640,7 +1800,7 @@ def _normalize_research_completed(ctx: _ControlIntake) -> dict:
         "reaffirm_memo_id"}
     unknown = set(raw) - allowed
     if unknown:
-        raise HTTPException(400, f"research_completed.memo has unknown field(s): {', '.join(sorted(unknown))}")
+        raise HTTPException(400, _unknown_fields_message(scope="research_completed.memo", unknown=unknown, allowed=allowed))
     state = ctx.state()
     raw = dict(raw)
     reaffirmed = _reaffirmed_memo(state, raw.pop("reaffirm_memo_id", None))
@@ -1715,7 +1875,7 @@ def _normalize_report_generated(ctx: _ControlIntake) -> dict:
         "body_markdown", "key_metrics", "author_claim", "figures", "campaign_overview"}
     unknown = set(raw) - allowed
     if unknown:
-        raise HTTPException(400, f"report_generated.content has unknown field(s): {', '.join(sorted(unknown))}")
+        raise HTTPException(400, _unknown_fields_message(scope="report_generated.content", unknown=unknown, allowed=allowed))
     if not any(raw.get(key) for key in ("headline", "summary", "verdict", "champion_summary",
                                         "body_markdown")):
         raise HTTPException(400, "report_generated.content needs a narrative")
@@ -2157,6 +2317,23 @@ def _normalize_card_filed(ctx: _ControlIntake) -> dict:
 
 
 # ------------------------------------------------------------------ append-time preconditions
+
+
+def _precondition_hint(state, event_type: str, data: dict, envelope) -> Optional[dict]:
+    from looplab.core.operator_directions import is_scoped, transition_error
+    if 'review_nomination' in data:
+        from looplab.core.report_review import review_input
+        try:
+            proof = data['review_nomination']
+            if review_input(state, generation=proof['generation'])['input_digest'] != proof['input_digest']:
+                raise ValueError('native report-review subject changed')
+        except (ValueError, KeyError, TypeError):
+            return _error('report_review_nomination_stale',
+                'Report or native outcomes changed before nomination publication; refresh the review.')
+    refusal = transition_error(data, state.operator_direction_ledger) if is_scoped(data) else None
+    return (_error(refusal[1], "Scoped direction changed before publication; refresh current directions.")
+            if refusal else None)
+
 #
 # Every one of these runs against a FRESH fold, immediately before the strict-lock append, inside
 # `_append_collaboration_intent`'s bounded CAS loop.  Intake validated the same subject, but an
@@ -2446,6 +2623,8 @@ assert _INJECT_IMPORT_FIELDS <= CONTROL_DATA_FIELDS[EV_INJECT_NODE], (
 # every field is already pinned by the shared checks).  Five events share a normalizer with a
 # sibling; that is deliberate and visible here rather than hidden in an `elif ... in {A, B}`.
 _CONTROL_NORMALIZERS: dict[str, Optional[Callable]] = {
+    EV_CLAIM_REVIEWED: _normalize_claim_reviewed,
+    EV_AGENT_CHECKPOINTED: _normalize_external_work_state,
     EV_RUN_ABORT: _normalize_run_abort,
     EV_PAUSE: _normalize_operator_reason,
     EV_RESTART: _normalize_restart,
@@ -2488,11 +2667,13 @@ _CONTROL_NORMALIZERS: dict[str, Optional[Callable]] = {
 assert set(_CONTROL_NORMALIZERS) == set(CONTROL_EVENTS), (
     "every control event needs an explicit intake normalizer (None = allow-list only)")
 
-# Only COLLABORATION_EVENTS reach the append-time recheck; the cross-check below is what makes the
+# Exactly SEMANTIC_CAS_EVENTS reach the append-time recheck; the cross-check makes the
 # `None`s honest.  It also closes the hole the old if/elif chain had: an unlisted event type fell
 # through to the COMMENT branch, so a new collaboration event added to `COLLABORATION_EVENTS` and
 # nowhere else was silently rechecked against a comment id it does not have.
 _CONTROL_PRECONDITIONS: dict[str, Optional[Callable]] = {
+    EV_CLAIM_REVIEWED: _precondition_claim_review,
+    EV_AGENT_CHECKPOINTED: None,
     EV_RUN_ABORT: None,
     EV_PAUSE: None,
     EV_RESTART: None,
@@ -2501,7 +2682,7 @@ _CONTROL_PRECONDITIONS: dict[str, Optional[Callable]] = {
     EV_NODE_ABORT: None,
     EV_NODE_RESET: None,
     EV_BUDGET_EXTEND: None,
-    EV_HINT: None,
+    EV_HINT: _precondition_hint,
     EV_SET_STRATEGY: None,
     EV_METRIC_RETARGET: None,
     EV_TRACK_REQUESTED: None,
@@ -2535,12 +2716,14 @@ _CONTROL_PRECONDITIONS: dict[str, Optional[Callable]] = {
 assert set(_CONTROL_PRECONDITIONS) == set(CONTROL_EVENTS), (
     "every control event needs an explicit append-time precondition (None = not applicable)")
 assert {event for event, handler in _CONTROL_PRECONDITIONS.items() if handler is not None} == set(
-    COLLABORATION_EVENTS), (
-    "exactly the collaboration events take the append-time recheck path")
+    SEMANTIC_CAS_EVENTS), (
+    "exactly the semantic-CAS events take the append-time recheck path")
 
 # `None` = the shared engine-policy tail decides (see `RunCommandService._decision`).  Collaboration
 # events never reach the dispatch at all: their decision is settled before liveness is even probed.
 _CONTROL_DECISIONS: dict[str, Optional[Callable]] = {
+    EV_CLAIM_REVIEWED: None,
+    EV_AGENT_CHECKPOINTED: None,
     EV_RUN_ABORT: _decide_run_abort,
     EV_PAUSE: _decide_pause,
     EV_RESTART: _decide_restart,
@@ -2594,6 +2777,8 @@ assert set(_CONTROL_DECISIONS) == set(CONTROL_EVENTS), (
 # a control silently running under the wrong engine policy (a NO_SPAWN intent waking a dead engine,
 # or an ENSURE_RUNNING command quietly never spawning one).
 _CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {
+    EV_CLAIM_REVIEWED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_AGENT_CHECKPOINTED: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_RUN_ABORT: (EnginePolicy.ENSURE_DRIVER_PRESERVE_STOP, "finished_and_stopped"),
     # `paused`, NOT `paused_and_stopped`. The postcondition must observe THE EFFECT THE OPERATOR
     # ASKED FOR. A pause is a folded, reversible flag; the engine PROCESS then finishes its in-flight
@@ -2652,12 +2837,19 @@ _CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {
 }
 
 
+_UNKNOWN_FIELD_NOTES: dict[str, str] = {
+    EV_REPORT_GENERATED: "nest report fields under data.content",
+    EV_RESEARCH_COMPLETED: "nest research memo fields under data.memo",
+}
+
+
 CONTROL_SPECS: dict[str, ControlSpec] = {
     event_type: ControlSpec(event_type, policy, postcondition,
                             CONTROL_DATA_FIELDS[event_type],
                             _CONTROL_NORMALIZERS[event_type],
                             _CONTROL_PRECONDITIONS[event_type],
-                            _CONTROL_DECISIONS[event_type])
+                            _CONTROL_DECISIONS[event_type],
+                            _UNKNOWN_FIELD_NOTES.get(event_type, ""))
     for event_type, (policy, postcondition) in _CONTROL_POLICIES.items()
 }
 assert set(CONTROL_SPECS) == set(CONTROL_EVENTS), "every control event needs an explicit ControlSpec"
@@ -2832,8 +3024,10 @@ def normalize_control(srv, rd: Path, event_type: str, data, *, agent_token: bool
     data = dict(data)
     unknown = set(data) - spec.data_fields
     if unknown:
+        allowed_client = spec.data_fields - CONTROL_SERVER_DERIVED_FIELDS.get(event_type, frozenset())
         raise HTTPException(
-            400, f"{event_type} has unknown field(s): {', '.join(sorted(unknown))}")
+            400, _unknown_fields_message(
+                scope=event_type, unknown=unknown, allowed=allowed_client, note=spec.unknown_field_note))
     _external_mode_restriction(rd, event_type, data, agent_token=agent_token)
 
     if spec.normalize is not None:

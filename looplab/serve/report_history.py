@@ -47,7 +47,8 @@ def _content(event) -> dict:
     return content
 
 
-def report_versions(events: Iterable, *, current_seq: Optional[int] = None) -> dict:
+def report_versions(events: Iterable, *, current_seq: Optional[int] = None,
+                    max_versions: Optional[int] = REPORT_VERSIONS_MAX) -> dict:
     """Every published report, newest first, each with its digest and `duplicate_of`.
 
     `current_seq` is the fold's published version (`RunState.report.published_seq`), marked
@@ -81,9 +82,11 @@ def report_versions(events: Iterable, *, current_seq: Optional[int] = None) -> d
         row["current"] = seq is not None and seq == current_seq
         rows.append(row)
     rows.reverse()
-    return {"versions": rows[:REPORT_VERSIONS_MAX], "total": len(rows),
+    if max_versions is not None and (type(max_versions) is not int or max_versions < 1):
+        raise ValueError("report version limit must be positive or None for a separately paged reader")
+    return {"versions": rows if max_versions is None else rows[:max_versions], "total": len(rows),
             "distinct": len(first_by_digest),
-            "truncated": len(rows) > REPORT_VERSIONS_MAX}
+            "truncated": max_versions is not None and len(rows) > max_versions}
 
 
 def report_version(events: Iterable, seq: int) -> Optional[dict]:

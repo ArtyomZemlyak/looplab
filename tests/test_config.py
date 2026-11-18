@@ -522,7 +522,7 @@ def test_legacy_snapshot_resume_does_not_switch_on_paid_work_the_run_never_did()
     resumed = settings_from_snapshot(era_snapshot)
     for field in ("foresight", "foresight_agentic", "foresight_verify", "foresight_alternatives",
                   "concept_pivot", "graded_novelty", "cross_run_concepts", "cross_run_advisory",
-                  "cross_run_structured_claims", "cross_run_curation", "cross_run_read_tools",
+                  "cross_run_curation", "cross_run_read_tools",
                   "concept_run_base", "fingerprint_universal", "memora_llm", "comparative_lessons",
                   "unified_agent", "failure_reflection", "reflection_priors",
                   "agent_drives_actions", "concurrent_research", "deep_repair"):

@@ -40,7 +40,7 @@ import json
 import math
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_serializer, model_validator
 
 from looplab.core.concepts import ConceptMaterializationReceipt
 # Aliased so the shared digest tail does not become part of this module's public namespace: historical
@@ -1312,6 +1312,15 @@ class Card(BaseModel):
     # Fold-only loss fact for the bounded enrichment projection. A private attribute is deliberate:
     # it reaches the public completeness receipt without creating a new Card DTO/RunState field.
     _card_enrichment_complete: bool = PrivateAttr(default=True)
+
+    premise_review: Optional[dict] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_premise_review(self, handler):
+        value = handler(self)
+        if self.premise_review is None and isinstance(value, dict):
+            value.pop('premise_review', None)
+        return value
 
     id: str                                             # native engine-minted `card-{k}` or legacy statement hash
     statement: str                                      # the DISPLAY statement (operator-editable in L6)

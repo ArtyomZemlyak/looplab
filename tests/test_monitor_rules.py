@@ -143,10 +143,8 @@ def test_a_failed_evaluation_closes_its_live_questions_instead_of_waiting(tmp_pa
     assert close_unanswered(rd, [q["checkpoint_id"]], "again") == []   # idempotent
 
 
-def test_a_stall_salvaged_evaluation_keeps_its_live_questions_open(tmp_path):
-    """Review 2026-10-15: a stall-salvaged attempt is an engine SUCCESS, so its open question is
-    not closed as "ended without a measurement" — the settle waits for its answer as for any
-    success (here the watcher reports an intervention, which ends the wait)."""
+def test_a_stall_salvaged_evaluation_preserves_unreviewed_observation_without_wait(tmp_path):
+    """A returned stall-salvaged success closes its operational question, never its review."""
     from looplab.engine.external_watch import settle_external_observations
 
     rd, store = seeded(tmp_path)
@@ -158,8 +156,10 @@ def test_a_stall_salvaged_evaluation_keeps_its_live_questions_open(tmp_path):
                               res=SimpleNamespace(exit_code=-9, timed_out=False, metric=0.4,
                                                   stalled=True))
     anyio.run(settle_external_observations, engine, attempt)
-    assert waited, "a success waits for its answer"
-    assert answer_for(rd, q["checkpoint_id"]) is None, "never closed as moot"
+    assert not waited, "a completed process must not wait for review"
+    assert answer_for(rd, q["checkpoint_id"]) is None, "closure is not an answer"
+    rows = [json.loads(line) for line in (rd / "harness_checkpoints.jsonl").read_text().splitlines()]
+    assert rows[-1]["type"] == "closure" and rows[-1]["review_status"] == "unreviewed"
 
 
 def test_attempt_failed_truth_table():

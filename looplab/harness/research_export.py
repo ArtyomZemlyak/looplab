@@ -51,7 +51,14 @@ def export(rd: Path, generation: str, selected: list[int], question_card_id: str
                                   'registration': e.get('registration') or {}} for e in matches[:100]]
     lines = ['# Research campaign export', '', f"Run: {research['run_id']}",
              f"Generation: {generation}", f"Event prefix: {events[-1].seq}", '',
-             research['goal']]
+             research.get('goal') or 'Campaign goal is unavailable in this bounded map; inspect the original run context.']
+    map_budget = research.get('response_budget')
+    if map_budget and (map_budget.get('limited') or map_budget.get('omitted_sections')):
+        omitted = ', '.join(map_budget.get('omitted_sections') or [])
+        lines += ['', '## Bounded research context',
+                  'This export includes one bounded map page. Read the research map with its exact collection cursors and section selection for remaining context.']
+        if omitted:
+            lines += ['Omitted map summaries: ' + omitted + '.']
     profile = profile_for_run(root, run_address(root, rd))
     if profile.get('state') == 'configured':
         value = profile['profile']
@@ -112,6 +119,20 @@ def export(rd: Path, generation: str, selected: list[int], question_card_id: str
             lines += ['', '### Figure references'] + [f'- [{ref["figure_id"]}]({ref["api"]}) (SHA-256 {ref["sha256"]})' for ref in figure_refs]
         manifest.append({'report_seq': seq, 'figures': figures, 'figure_refs': figure_refs,
                          'report_api': f'{root}/report/versions/{seq}', 'content_sha256': report_digest(content)})
+    from looplab.events.replay import fold
+    from looplab.harness.telemetry import project as project_telemetry
+    telemetry = project_telemetry(events, fold(events), generation, include_items=True, limit=20)
+    lines += ['', '## External harness identity and spend at export', telemetry['meaning'],
+              'Receipt state: ' + telemetry['state'],
+              'LLM subtotals with coverage: ' + json.dumps(telemetry['llm'], ensure_ascii=False),
+              'Agent-reported wall segments (seconds): ' + json.dumps(telemetry['agent_reported_wall_seconds']),
+              'Native ledgers (separate): ' + json.dumps(telemetry['native'], ensure_ascii=False)]
+    for row in telemetry['items']:
+        lines += [f"- node #{row['node_id']} attempt {row['attempt']}: revision {row['revision_id']}; "
+                  f"{row['revision']['provider']} / {row['revision']['model']}; {row['observation_level']}; "
+                  f"recorded {row['recorded_at']}; receipt {row['receipt_id']}"]
+    if telemetry['has_more']:
+        lines += ['Only the latest twenty sanitized receipts are embedded; page /external-telemetry with prefix_digest for earlier revisions.']
     publication = (profile.get('profile') or {}).get('publication') if profile.get('state') == 'configured' else None
     adapter = ({'state': 'configured', **publication, 'operation': 'manual download only'}
                if publication else {'state': 'unconfigured'})
@@ -120,6 +141,8 @@ def export(rd: Path, generation: str, selected: list[int], question_card_id: str
         raise HTTPException(413, 'Export exceeds the response limit; select fewer reports.')
     result = {'version': 1, 'run_id': research['run_id'], 'run_uid': research['run_uid'],
             'generation': generation, 'event_seq': events[-1].seq, 'markdown': markdown,
+            'map_response_budget': map_budget, 'external_telemetry': telemetry,
+            'observation': {'map_event_seq': research['event_seq'], 'same_event_prefix': research['event_seq'] == events[-1].seq, 'atomic_across_sources': False},
             'markdown_sha256': hashlib.sha256(markdown.encode()).hexdigest(), 'reports': manifest, 'metric_profile': profile, 'direction': direction, 'publication_adapter': adapter,
             'limits': 'Figures are references, not copied bytes; sources are independently read, not an atomic snapshot.'}
     if len(json.dumps(result, ensure_ascii=False).encode('utf-8')) > 240 * 1024:

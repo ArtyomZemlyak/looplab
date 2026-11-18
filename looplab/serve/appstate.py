@@ -50,7 +50,7 @@ from looplab.serve.agent_activity import AgentActivity
 from looplab.serve.http import refusal
 from looplab.serve.jobs import JobRegistry
 from looplab.serve.llm_context import global_settings, llm_settings
-from looplab.serve.node_activity import public_node_activity
+from looplab.serve.node_activity import public_node_activity, public_node_times
 from looplab.serve.projects import ProjectStore
 from looplab.serve.protocol import (
     PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINISHED, PHASE_GROUNDING, PHASE_ONBOARDING, PHASE_PAUSED,
@@ -704,8 +704,14 @@ Historical incident details omitted.
         # fetched on demand via /nodes/{id}. Keeps SSE ticks small even for code-writing runs.
         # exclude open event journals before Pydantic copies them, then publish only the
         # bounded derived DTO. This shared boundary feeds owner state, SSE, and review state.
-        d = st.model_dump(mode="json", exclude=INTERNAL_CARD_STATE_FIELDS | {"cards"})
+        d = st.model_dump(mode="json", exclude=INTERNAL_CARD_STATE_FIELDS | {"cards", "metric_behavior_scans"})
+        from looplab.core.metric_behavior import metric_behavior_view
+        d['metric_behavior_scans'] = metric_behavior_view(st)
         d["run_id"] = run_address(self.root, rd)
+        if isinstance(st.plan, dict) and st.plan.get("node_count_basis") == "card_budget":
+            from looplab.engine.plan import plan_node_count
+            # Observed projection only: never persist a changing count into the immutable plan row.
+            d["plan"]["current_node_count"] = plan_node_count(st)
         # Scrub the broad folded state before inserting the independently bounded/redacted Card DTO.
         # Otherwise valid action params/search dimensions named "raw" or "code" are removed after the
         # Card projection has declared them exact, leaving a completeness receipt that describes data
@@ -766,6 +772,7 @@ Historical incident details omitted.
             # evaluating, and waiting without scanning a bounded timeline or guessing by node id.
             try:
                 n["activity"] = public_node_activity(st, int(node_id), withheld=withheld)
+                n.update(public_node_times(st.nodes.get(int(node_id))))
                 n["parent_comparison"] = public_parent_comparison(st.nodes.get(int(node_id)))
             except (TypeError, ValueError, OverflowError):
                 # Pydantic's JSON dump produces integer/string integer keys, but keep this light

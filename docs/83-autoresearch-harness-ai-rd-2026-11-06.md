@@ -1,8 +1,12 @@
 # 83. Autoresearch, улучшение harness и измерение AI R&D
 
 **Дата:** 2026-11-06. **База:** `master` `7e084afdac2a00734b96d6aeb20920ad0069e190`.
-**Статус:** критический разбор первоисточников, сверка с кодом и одним живым production run,
-предложения и новые OPEN-маркеры. Код, defaults и живые jobs этим документом не меняются.
+**Статус:** критический разбор первоисточников, сверка с кодом и живым production run, предложения
+и OPEN-маркеры. Последующая правка исправляет наблюдаемость и внешний research workflow в ветке;
+defaults, production runtime и живые jobs не меняются. Проверка описана в §7.3.
+
+Сверка сессий, версий и всех действующих маркеров: [аудит 10 ноября](audit/session-open-triage-20261110.md).
+Он различает исправление в исходниках, публикацию и deployment; старые инциденты не удаляются.
 
 ## 1. Главный вывод
 
@@ -296,20 +300,17 @@ Citation rate остаётся диагностикой использовани
 
 ### 7.1. P0/P1 — корректность и наблюдаемость
 
-- **OPEN[job-role-lost-at-node-creation].** `job_role` валидируется и показывается в контракте, но не
-  проходит через единый emitter создания ноды, поэтому replay и классификация теряют роль.
-  proof:`absent:job_role=_OMIT@looplab/engine/node_build.py`
-  **Исправление:** добавить optional поле в emitter и вызовы с сохранением старых payload shapes; проверить
-  public API, фактический `node_created`, replay и rebuild. Приёмка: роль видна у новой попытки и после replay,
-  старые записи остаются `unknown`.
+- **Исправлено: потеря `job_role` при создании ноды.** Единый emitter теперь сохраняет optional
+  `job_role` в фактическом `node_created`, replay возвращает его в `Node`, а rebuild наследует роль.
+  Старые события без этого поля остаются `unknown`, а не получают ретроспективную классификацию.
+  Отдельный `node_kind=artifact` по-прежнему не является синонимом job role и не обещает primary scalar.
+  Регрессионная проверка: `tests/test_job_role_materialization.py`.
 
-- **OPEN[external-reads-lack-end-to-end-bounds].** Bootstrap читает полный state, а research map ограничивает
-  коллекции по отдельности, но не всю проекцию; production-факты в §5.
-  proof:`present:state = read("/state?observe_only=true", "state")@looplab/harness/mcp_server.py`
-  **Исправление:** маленький generation/connection summary вместо full state, field selection и
-  независимые cursors для коллекций, общий byte/item budget с явными omissions. Приёмка: долгий run проходит
-  connection check без увеличения глобального cap; карта имеет предсказуемый размер, ничего не исчезает
-  незамеченным, replay/история доступны по ссылкам.
+- **Bounded external reads — isolated implementation, 11 November.** Bootstrap now reads a small
+  versioned identity; API/MCP/CLI/UI research maps share a 64 KiB whole-response budget, explicit
+  section omissions and independent collection cursors. Historical reports past 200 remain reachable.
+  Synthetic HTTP/MCP/CLI/UI acceptance is recorded in [bounded reads](audit/external-read-bounds.md).
+  Production incidents in §5 remain historical evidence; this is not a live deployment claim.
 
 - **OPEN[evaluation-faithfulness-not-attested].** Защита scorer доказывает целостность исполнения, но не
   соответствие target и теста исходному научному намерению.
@@ -319,31 +320,28 @@ Citation rate остаётся диагностикой использовани
   availability или scoring policy выявляются до научного вывода; technical retry может обойтись без
   literature review; число с неизвестной сопоставимостью не попадает в общий ranking как сравнимое.
 
-- **OPEN[external-harness-version-and-spend-unrecorded].** Для независимого external/toy режима нет
-  воспроизводимой версии harness и учёта model/agent spend; делегированный `cli_agent` — отдельный режим с
-  собственным учётом.
+- **OPEN[external-harness-version-and-spend-unrecorded].** Existing diagnostic checkpoints now record
+  bounded, non-secret revision fingerprints and delta usage with exact run/node/attempt identity;
+  API/UI/export preserve provider-client observations versus agent declarations, missing counters,
+  conflicting duplicates and original revisions after restart while keeping native LLM accounting and
+  GPU hours separate ([source acceptance](audit/external-harness-telemetry.md)). Live campaign client
+  coverage and independent billing attestation remain unmeasured.
   proof:`absent:RESULT 20@docs/audit/external-harness-telemetry.md`
-  **Исправление:** версионированные receipts Harness Revision и usage с уровнем наблюдения, ссылками на
-  попытку и временем, без сырых секретов/transcripts. Приёмка по [протоколу](audit/external-harness-telemetry.md):
-  две попытки с разными harness различимы; LLM, GPU и wall-clock складываются только в явно обозначенные
-  totals; unknown не считается нулём.
 
-- **OPEN[external-work-state-has-no-authored-checkpoint].** Internal phase checkpoints не описывают
-  текущую работу отдельного внешнего агента и его незавершённые наработки.
-  proof:`absent:RESULT 20@docs/audit/external-work-state-recovery.md`
-  **Исправление:** компактная авторская проекция состояния, версия harness, blocker/owner, work claims и
-  ссылки на артефакты; saved commands/actions переиспользуются, второй event spine не создаётся. Приёмка по
-  [протоколу](audit/external-work-state-recovery.md): после compaction/restart агент восстанавливает одно
-  актуальное действие, не исполняет старые уведомления и не дублирует fit/score; receipt не является
-  execution authority.
+- **Authored external recovery state — isolated implementation, 11 November.** The existing native
+  `agent_checkpointed` event now carries bounded external work notes through saved command receipts.
+  Progress/briefing recovers goal, last completed step, blocker/owner and unfinished references;
+  changed direction/lifecycle/budget context withholds the old next-step suggestion. The concrete
+  recovery action is a pure receipt/progress read. [MCP/native/cold-process acceptance](audit/external-work-state-recovery.md)
+  preserves completed nodes and original payloads without automatic retry. Artifact/harness/tool
+  identities remain declared or unverified until independently checked; no live rollout is claimed.
 
-- **OPEN[operator-directions-lack-explicit-retirement].** Существующий `replace: true` заменяет standing
-  directive, но scoped lifecycle по id/topic и completed по-прежнему отсутствует.
-  proof:`present:texts = operator_directive_texts(getattr(state, "pending_hints", None))@looplab/harness/progress.py`
-  **Исправление:** переиспользовать `replace` и добавить стабильный id, topic/scope, `supersedes`, статусы
-  active/completed/cancelled и разрешение конфликтов с audit trail. Приёмка: завершённая директива не занимает
-  текущий контекст, независимые задачи сосуществуют, старое время не воскрешает authority, ручное изменение
-  приоритета видно раньше исторических handoffs.
+- **Operator direction lifecycle — isolated implementation, 11 November.** Scoped hint commands
+  now carry immutable IDs/topics, exact same-topic supersession and explicit completed/cancelled
+  retirement. Retired IDs stay retired across duplicates, accepted-command replay, legacy global
+  replace and service restart. Current context omits retired instructions; history remains durable.
+  [Public command/replay acceptance](audit/operator-direction-lifecycle.md) includes append races
+  and preserves existing cold-start quarantine and active-command admission guards. No live rollout.
 
 ### 7.2. P1/P2 — управляемое улучшение и научная ценность
 
@@ -370,19 +368,67 @@ Citation rate остаётся диагностикой использовани
   опирается на outcome по задачам, а citation не используется как суррогат истины; shared KB не меняется
   автоматически.
 
-- **OPEN[research-acceleration-attribution-missing].** Нет протокола, отличающего скорость одного запуска
-  от ускорения исследовательской программы и распределяющего эффект по реальным узким местам.
+- **OPEN[research-acceleration-attribution-missing].** Протокол уже записан, но нет принятого измерения
+  ускорения исследовательской программы с полными затратами и атрибуцией ожидания по причинам.
   proof:`absent:RESULT 20@docs/audit/research-acceleration.md`
   **Исправление:** Research Ledger и сопоставимые кампании по [протоколу](audit/research-acceleration.md).
   Приёмка: verified improvement, quality, полные agent/LLM/GPU costs, wall time, повторная работа и
   waiting causes видимы вместе; self-reported временные оценки не выдаются за контрфактуал; нет заявления
   об ускорении при несопоставимом результате.
 
+### 7.3. Исправления после живого разбора
+
+В рабочей ветке закрыт `job-role-lost-at-node-creation` и исправлена наблюдаемость внешнего workflow.
+Единый `node_created` emitter сохраняет `job_role`; replay и rebuild сохраняют старые записи как
+`unknown`. `created_at`, `eval_started_at`, `completed_at` вычисляются из событий, но не попадают во
+внутренний `model_dump`: public `/state`, `/nodes/{id}` и research map добавляют их отдельной
+проекцией, поэтому golden replay остаётся прежним.
+
+`uses` отображается пунктиром отдельно от научных parents; Concepts показывает operator эксперимента.
+Artifact completion без scalar объясняется как не-ranked работа, а не измеренное улучшение или ноль.
+Blocker’ы получили человеческие пояснения; `work_terminal` не выдаётся за ошибку. Research map
+показывает timestamps, типы работ, связи, notice dispositions и различает `bound`, `missing` и
+`explained_unavailable` у report metrics. Повтор overview/body — только advisory, не truth verdict.
+
+External research skill и новый `looplab-deep-research` требуют реальные primary sources, claims с
+ссылками, сопоставление протоколов и следующий различающий эксперимент; technical retry не требует
+фальшивой литературы. Задокументированы один staged fit→score, различия `job_role`/`node_kind`,
+`question_card_id`/`parent_card_id`/`parent_ids`/`uses`, разные shared/run-local lessons и отчёты
+без механических дублей. При `auto` в run и project briefing консервативно выбирает язык по goal;
+явные настройки важнее, исторические записи не переводятся.
+
+Проверка: 390 backend-тестов, 44 целевых UI-теста, production UI build и strict MkDocs прошли;
+полный UI-набор — 2237 passed / 0 failed с `--test-concurrency=4`.
+Production runtime, healthy fit,
+исходные scorer/settings и живые jobs не изменялись. Сохранённый live journal использовался только
+для read-only проверки: timestamps читаются, старые `job_role` остаются unknown, текущий отчёт
+получает `explained_unavailable` из собственного объяснения отсутствия native scalar.
+
+### 7.4. Инциденты исполнения и загрузки: сверка 10 ноября
+
+10 ноября обнаружены три отдельных остатка в исходниках `afbc48d` и инцидентах на `7e084af`.
+Ошибки пользовательских publisher, API-вызовов и толкования поручения сюда не включены.
+
+- **Exact pending-inject cancellation:** локальная реализация 11 ноября отменяет только точный
+  unmaterialized head по original command, queue index/digest и run UID/generation, при доказанно
+  остановленном владельце. [Приёмка](audit/pending-inject-cancellation.md) проверяет public API/MCP,
+  atomic journal batch, потерянный ACK, torn publication и fencing старого worker до respawn. Это
+  не обновление live runtime и не разрешение запускать или останавливать neural work.
+
+- **Completed evaluation и advisory review:** локальная реализация 11 ноября сохраняет исходное
+  наблюдение с `ended_before_decision`/`unreviewed` и `answer=null`, затем фиксирует execution terminal.
+  [Приёмка](audit/completed-eval-advisory-monitor.md) проверяет реальные CPU команды, неизвестный result,
+  гонки публикации и lifecycle fences. Stage/deadline gates сохраняются; live deployment не выполнялся.
+
+- **Per-query metadata preflight:** реализован и проверен в локальной ветке реализации 11 ноября.
+  [Приёмка](audit/per-query-upload-preflight.md) содержит HTTP/MCP regressions, exact replay и attempt
+  race; `no_measured_value` сохранён. Это не утверждение о публикации или обновлении live runtime.
+
 ## 8. Что делать с уже существующими OPEN
 
 Новые пункты не отменяют старый индекс:
 
-- **Evaluation и рецензирование:** `no-metric-behaviour-detector` отвечает за поведение метрики,
+- **Evaluation и рецензирование:** `metric-behavior-thresholds-unmeasured` сохраняет calibration нового numerical observer,
   `report-review-nominates-no-experiment` — за недостающие confirm/ablation/comparison. Evaluation
   Faithfulness связывает их с исходным научным вопросом, а не дублирует.
 - **Разнообразие и память:** QD-Rec полезен для `board-rotation-by-attempt-only`,

@@ -11,10 +11,23 @@ from looplab.harness.readiness_binding import snapshot as binding_snapshot
 from looplab.core.run_ref import run_address
 
 
+def effective_authoring_language(configured: str, project: str, goal: str) -> tuple[str, str]:
+    """Resolve explicit preference, otherwise conservatively infer from the authored goal."""
+    if configured in ('en', 'ru'):
+        return configured, 'run_config'
+    if project in ('en', 'ru'):
+        return project, 'project_preference'
+    cyrillic = sum('а' <= char.lower() <= 'я' or char.lower() == 'ё' for char in goal)
+    latin = sum('a' <= char.lower() <= 'z' for char in goal)
+    if cyrillic >= 20 and cyrillic * 4 >= latin:
+        return 'ru', 'goal_inferred'
+    return 'en', 'default'
+
+
 def snapshot(rd: Path, generation: str, *, language: str = 'en', root: Path | None = None) -> dict:
     root = root if root is not None else rd.parent
     from looplab.serve.node_activity import public_node_activity
-    progress = brief(progress_snapshot(rd, generation, activity_reader=public_node_activity, language=language))
+    progress = brief(progress_snapshot(rd, generation, activity_reader=public_node_activity, language=language, root=root))
     research = map_snapshot(rd, generation, limit=5, root=root)
     bindings = binding_snapshot(rd, generation)
     gpu = queue_status(resources.default_gpu_host_lease_path())
@@ -49,14 +62,19 @@ def snapshot(rd: Path, generation: str, *, language: str = 'en', root: Path | No
     from looplab.harness.snapshot_settings import read_harness_settings
     configured_language = getattr(read_harness_settings(rd), 'output_language', 'auto')
     project_language = profile.get('profile', {}).get('authoring_language', 'auto')
-    effective_language = configured_language if configured_language in ('en', 'ru') else project_language
+    effective_language, language_source = effective_authoring_language(
+        configured_language, project_language, research.get('goal') or '')
+    if 'goal' not in research and configured_language == project_language == 'auto':
+        language_source = 'goal_unavailable'
     return {'version': 1, 'generation': progress['generation'], 'run_uid': progress['run_uid'],
-            'event_seq': progress['event_seq'], 'goal': research['goal'], 'metric_profile': profile,
-            'authoring_language': {'language': effective_language, 'run_config': configured_language,
-                                   'project_preference': project_language,
-                                   'meaning': 'Explicit run language takes precedence; otherwise use project preference. Preserve evidence, IDs and code; never translate a measurement.'},
+            'event_seq': progress['event_seq'], 'goal': research.get('goal'), 'metric_profile': profile,
+            'authoring_language': {'language': effective_language, 'source': language_source,
+                                   'run_config': configured_language, 'project_preference': project_language,
+                                   'meaning': 'Explicit run language takes precedence over project preference; auto/auto is conservatively inferred from the goal. Apply it to new authored prose, never rewrite evidence, IDs, code or measurements.'},
             'report_context': report,
             'operator_directions': progress.get('operator_directions'),
+            'external_work_state': progress.get('external_work_state'),
+            'external_telemetry': progress.get('external_telemetry'),
             'next_step': progress['next_step'], 'execution': progress['execution'],
             'recorded_lifecycle': progress['recorded_lifecycle'],
             'candidate_blockers_if_expanding': progress['candidate_blockers_if_expanding'],
@@ -64,8 +82,9 @@ def snapshot(rd: Path, generation: str, *, language: str = 'en', root: Path | No
             'finish_pending_nodes': progress['finish_pending_nodes'],
             'finish_reviews_due': progress['finish_reviews_due'], 'finish_report_due': progress['finish_report_due'],
             'source_health': {'progress': progress['source_health'], 'protocol': research['source_health']['protocol']},
-            'research': {'experiments': research['experiments'], 'reports': research['reports'], 'quality': research['quality'],
-                         'campaign_overview': research['campaign_overview'],
+            'research': {'experiments': research['experiments'], 'reports': research['reports'], 'quality': research.get('quality'),
+                         'campaign_overview': research.get('campaign_overview'),
+                         'response_budget': research.get('response_budget'),
                          'recent_profile_measurements': measured},
             'readiness': {'items': bindings['items'][-5:], 'plans': plans[:10],
                           'truncated': bindings['truncated'] or len(bindings['items']) > 5 or len(plans) > 10 or research['experiments']['has_more'], 'meaning': bindings['meaning']},

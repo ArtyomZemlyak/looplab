@@ -634,7 +634,7 @@ class _CeilingEvalHost:
     def _eval_seed_ledgers(self, a):
         pass
 
-    async def _reclaim_devices_for_attempt(self, a):   # this host reserves no devices
+    async def _reclaim_devices_for_attempt(self, a, slot=None):   # this host reserves no devices
         pass
 
     def _yield_devices_for_repair(self, a):             # pragma: no cover
@@ -908,7 +908,7 @@ def test_a_run_attempt_that_never_returned_carries_no_result_from_the_attempt_be
         async def _claim_eval_invocation(self, _a):
             return None
 
-        async def _reclaim_devices_for_attempt(self, _a):   # this host reserves no devices
+        async def _reclaim_devices_for_attempt(self, _a, slot=None):   # this host reserves no devices
             return False
 
         def _run_eval(self, *_a):
@@ -918,6 +918,7 @@ def test_a_run_attempt_that_never_returned_carries_no_result_from_the_attempt_be
             written.append(a.res)
 
     host = _Host()
+    host.run_dir = tmp_path  # real launch-scope guard reads the supported science default
     a = EvalAttempt(node_id=0, max_es=None)
     a.generation, a.attempt, a.workdir = 0, 1, tmp_path
     a.node = types.SimpleNamespace(idea=None)

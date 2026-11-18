@@ -77,7 +77,7 @@ from looplab.events.state_delta import DELTA_VERSION, diff as state_diff
 from looplab.serve.protocol import (
     EXPECTED_RUN_GENERATION_FIELD, PHASE_FINALIZING, POLL_SECONDS, RUN_GENERATION_FIELD,
     SSE_DONE, SSE_STATE, SSE_STATE_DELTA)
-from looplab.serve.node_activity import public_node_activity
+from looplab.serve.node_activity import public_node_activity, public_node_times
 from looplab.serve.public_cards import PublicCardsProjectionMetadata
 # Re-exported for `tests/test_concepts_endpoint.py`, which imports it from THIS module to
 # prove the endpoint's edge-collapse mirrors the fold's tiebreak.
@@ -712,6 +712,10 @@ class ExternalSkillBody(BaseModel):
     action_id: str = Field(min_length=1, max_length=160)
     lesson_action_id: str = Field(min_length=1, max_length=160)
     body: str = Field(min_length=1, max_length=16000)
+    external_source: dict[str, Any] | None = None
+    validation_code: str | None = Field(default=None, min_length=1, max_length=32000)
+    excluded_terms: list[str] | None = Field(default=None, max_length=32)
+    exclusion_review: str | None = Field(default=None, min_length=1, max_length=1000)
 
 
 class ExternalDecisionBody(BaseModel):
@@ -1108,6 +1112,31 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(409, "run generation changed")
         return {"generation": body.expected_generation, **review_memo(body.memo, purpose=body.purpose)}
 
+    @router.get("/api/runs/{run_id}/external-telemetry")
+    def get_external_telemetry(run_id: str, response: Response,
+                              expected_generation: str = Query(..., pattern=r"^[0-9a-f]{64}$"),
+                              offset: int = Query(0, ge=0, le=1_000_000),
+                              limit: int = Query(20, ge=1, le=20),
+                              expected_prefix: str | None = Query(None, pattern=r"^[0-9a-f]{64}$")):
+        """Sanitized revision/usage receipts, separate ledgers and explicit unknown coverage.
+
+        Provider observations are supplied client-adapter receipts, not independent billing
+        attestation. Continue only on the returned prefix_digest; a changed receipt set requires
+        restarting the first page. This read never runs a model or reconciles a command.
+        """
+        from looplab.harness.journals import read_event_source
+        from looplab.harness.telemetry import project
+        from looplab.events.run_generation import run_generation_token
+        from looplab.events.replay import fold
+        events = read_event_source(_run_dir(run_id))
+        if run_generation_token(events) != expected_generation:
+            raise HTTPException(409, "run generation changed")
+        result = project(events, fold(events), expected_generation, offset=offset, limit=limit, include_items=True)
+        if expected_prefix is not None and expected_prefix != result["prefix_digest"]:
+            raise HTTPException(409, {"code": "external_telemetry_changed", "message": "Restart the first receipt page explicitly."})
+        response.headers["Cache-Control"] = "no-store"
+        return result
+
     @router.get("/api/runs/{run_id}/research-briefing")
     def get_research_briefing(run_id: str, response: Response,
                               expected_generation: str = Query(..., pattern=r"^[0-9a-f]{64}$"),
@@ -1167,13 +1196,34 @@ def build_router(srv) -> APIRouter:
     def get_research_map(run_id: str, response: Response,
                          expected_generation: str = Query(...),
                          offset: int = Query(0, ge=0, le=1000000),
-                         limit: int = Query(20, ge=1, le=100)):
+                         limit: int = Query(20, ge=1, le=100),
+                         collections: list[str] = Query(default=[]),
+                         cursors: str | None = Query(default=None, max_length=2048),
+                         max_bytes: int = Query(65536, ge=4096, le=65536),
+                         max_items: int = Query(40, ge=1, le=100)):
         """Bounded read-only map of registered experiments, node references and reports."""
         from looplab.harness.research_map import snapshot
         if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
             raise HTTPException(400, "expected_generation must be a SHA-256 token")
         response.headers["Cache-Control"] = "no-store"
-        return snapshot(_run_dir(run_id), expected_generation, offset, limit, root=srv.root)
+        import json
+        try:
+            decoded = json.loads(cursors) if cursors is not None else None
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(400, {"code": "invalid_research_map_cursor"}) from exc
+        return snapshot(_run_dir(run_id), expected_generation, offset, limit, root=srv.root,
+                        collections=collections or None, cursors=decoded,
+                        max_bytes=max_bytes, max_items=max_items)
+
+    @router.get("/api/runs/{run_id}/work-claims")
+    def get_work_claims(run_id: str, response: Response,
+                        expected_generation: str = Query(..., pattern=r"^[0-9a-f]{64}$"),
+                        peer: list[str] = Query(default=[]),
+                        max_bytes: int = Query(65536, ge=4096, le=65536)):
+        """Read authored work declarations of selected same-task peers; no exclusivity or launch gate."""
+        from looplab.harness.work_claims import snapshot
+        response.headers['Cache-Control'] = 'no-store'
+        return snapshot(srv.root, _run_dir(run_id), run_id, expected_generation, peer, max_bytes)
 
     @router.get("/api/runs/{run_id}/research-workflow")
     def get_research_workflow(run_id: str):
@@ -1201,6 +1251,14 @@ def build_router(srv) -> APIRouter:
         except (OSError, ValueError, KeyError) as exc:
             raise refusal("config_snapshot_unreadable") from exc
         return run_obligations(task, settings, generation=generation)
+
+    @router.get("/api/runs/{run_id}/harness-identity")
+    def get_harness_identity(run_id: str, response: Response):
+        """Bounded identity discovery; reads no broad state projection and starts no work."""
+        from looplab.harness.connection import snapshot
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Vary"] = "X-LoopLab-Token, Authorization"
+        return snapshot(_run_dir(run_id), root=srv.root)
 
     @router.get("/api/runs/{run_id}/harness-handoff")
     def get_harness_handoff(run_id: str, response: Response,
@@ -1254,7 +1312,7 @@ def build_router(srv) -> APIRouter:
         rd = _run_dir(run_id)
         result = snapshot(rd, expected_generation,
                           activity_reader=public_node_activity, offset=offset, limit=limit,
-                          language=language)
+                          language=language, root=srv.root)
         if request_agent_token(request):
             srv.agent_activity.observe(rd, result["generation"])
         from looplab.serve.agent_activity import waiting_for_agent
@@ -1848,6 +1906,7 @@ def build_router(srv) -> APIRouter:
                         "trace_revision": trace_revision}
             raise HTTPException(404, "no such node")
         out = n.model_dump(mode="json")
+        out.update(public_node_times(n))
         # A lifecycle a pause WITHHELD reads `queued`, not `evaluating` (doc 69 69.12b) — its row is
         # diagnostic, so the log is read for it, and only for the one state it can change: a pending
         # lifecycle the current owner admitted. Off the prefix already read on a historical view;

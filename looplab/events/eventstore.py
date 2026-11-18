@@ -1054,6 +1054,7 @@ class EventStore:
     def append_many(self, records: Sequence[tuple[str, dict[str, Any]]], *,
                     trace_id: "str | None" = _UNSET_TRACE,
                     span_id: "str | None" = _UNSET_TRACE,
+                    record_contexts: "Sequence[tuple[str | None, str | None]] | None" = None,
                     expected_last_seq: "int | None" = None,
                     require_lock: bool = False,
                     require_durable: bool = False) -> list[Event]:
@@ -1064,7 +1065,8 @@ class EventStore:
         returning Events. Its guarded disk type makes pre-batch readers fail closed. A torn final line
         therefore exposes zero members, while a complete envelope preserves the historical contiguous
         sequences and return value. Another writer can land before the group or after it, never between
-        its records. An empty group is a no-op.
+        its records. An empty group is a no-op. ``record_contexts`` preserves each producer's
+        trace/span pair when a transaction joins buffered events from different spans.
         """
         if not records:
             return []
@@ -1072,6 +1074,13 @@ class EventStore:
             raise ValueError(f"event batch exceeds {_MAX_EVENT_BATCH_MEMBERS} members")
         if any(event_type == _EVENT_BATCH_TYPE for event_type, _data in records):
             raise ValueError("the internal event batch type is reserved")
+        if record_contexts is not None:
+            record_contexts = tuple(record_contexts)
+            if (len(record_contexts) != len(records) or any(
+                    not isinstance(context, tuple) or len(context) != 2
+                    or any(value is not None and not isinstance(value, str) for value in context)
+                    for context in record_contexts)):
+                raise ValueError("event batch contexts must align with records as trace/span pairs")
         if trace_id is _UNSET_TRACE:
             trace_id, span_id = current_ids()
 
@@ -1082,8 +1091,8 @@ class EventStore:
                     ts=time.time(),
                     type=event_type,
                     data=data,
-                    trace_id=trace_id,
-                    span_id=span_id,
+                    trace_id=trace_id if record_contexts is None else record_contexts[offset - 1][0],
+                    span_id=span_id if record_contexts is None else record_contexts[offset - 1][1],
                 )
                 for offset, (event_type, data) in enumerate(records, start=1)
             ]

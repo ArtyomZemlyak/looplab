@@ -299,6 +299,8 @@ def test_every_control_event_has_one_explicit_engine_policy():
     assert {name for name, spec in CONTROL_SPECS.items()
             if spec.engine_policy is EnginePolicy.NO_SPAWN} == {
         "pause", "node_abort", "hint", "annotation", "promote",
+        # External authored recovery uses the existing diagnostic checkpoint, never a driver.
+        "agent_checkpointed",
         "comment_created", "comment_edited", "comment_resolution_changed", "concept_tag_edited",
         "run_concepts",
         "hypothesis_added", "hypothesis_updated",
@@ -308,7 +310,7 @@ def test_every_control_event_has_one_explicit_engine_policy():
         "card_reprioritized", "card_edited", "card_resource_pinned", "card_dropped",
         "card_reopened", "research_completed", "report_generated",
         # `card_filed`: the operator's research-lineage correction — a folded overlay, no compute.
-        "card_filed",
+        "card_filed", "claim_reviewed",
         # doc 68 68.2: a retarget re-ranks every node in the FOLD; a stopped run needs no engine.
         "metric_retarget",
         # doc 73 §1.4: a queued evaluation track — the LIVE engine serves it; a stopped run keeps
@@ -3760,3 +3762,18 @@ def test_startup_recovery_of_an_expired_restart_appends_nothing_and_says_so(tmp_
     assert final["error"]["code"] == "deadline_passed_before_intent", final
     assert final["error"]["retryable"] is True
     assert "restart" not in _types(rd) and driver.calls == []
+
+
+def test_claim_review_is_folded_without_spawning_a_stopped_driver(tmp_path, monkeypatch):
+    from tests.test_claim_premise_review import _seed as seed_claims, _data
+
+    rd, store, generation = seed_claims(tmp_path, monkeypatch)
+    driver = _Driver(alive=False)
+    client, _srv = _client(tmp_path, driver)
+    response = _post(client, "claim_reviewed", _data("card-2", ["card-1"]),
+                     key="review-without-driver", run_id="r", generation=generation)
+    assert response.status_code in (200, 202), response.text
+    record = _terminal(client, response.json(), run_id="r")
+    assert record["status"] == "succeeded", record
+    assert fold(store.read_all()).cards["card-2"].premise_review is not None
+    assert driver.calls == []

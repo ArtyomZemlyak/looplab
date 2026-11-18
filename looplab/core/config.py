@@ -2344,15 +2344,6 @@ class Settings(BaseSettings):
     # bare-library EngineOptions default stays off (engine/options.py, frozen in
     # test_options_divergence). See engine/proposal_cues.py.
     cross_run_advisory: bool = True
-    # PART IV cross-run §21.20.13 (full CR of the lean fuzzy claim merge). Switch the claim read-model to the
-    # SCOPE+POLARITY-safe STRUCTURED claim key (engine/claim_key.py): claims from different tasks never
-    # merge, opposite polarity ("X helps" vs "X never helps") is surfaced as a CONTRADICTION instead of being
-    # collapsed, paraphrase/inflection variants group by exact structured key (no transitive over-merge), and
-    # operator governance is scope-precise (a decision in task A cannot reach a same-worded claim in task B).
-    # Affects the `cross_run_advisory` context pack only; ON by default in the product Settings (ce4a379),
-    # and since 2026-09-08 (doc 25 EM-06) in the bare-library EngineOptions and every projection signature
-    # too — the durable write path never had another mode. See engine/claims.py.
-    cross_run_structured_claims: bool = True
     # PART IV cross-run §22.4 (AGENTIC portfolio stewards). At finalize, when an LLM client is available,
     # let the concept and claim stewards review the freshly-updated portfolio and PROPOSE curation. Proposals
     # are LOGGED for operator ratification (via the serve/CLI governance surface); the LLM never mutates fold
@@ -2405,6 +2396,25 @@ class Settings(BaseSettings):
     # execution-free reward (static validity + metric-print). 1 = off. In-house LLM developer only
     # (not external agents — ADR-7 cost rule). The top SWE-bench reliability lever for weak models.
     best_of_n: int = 1
+    # Optional code-only native pilot method. Rendering never executes candidates;
+    # all pilots and the chosen full run share normal native resource/stop/time accounting.
+    # Null preserves historical selection. Fidelity review is authored, not measurement proof.
+    best_of_n_pilot: dict | None = None
+    # Explicit fixed stdio transport to a CPU worker; null preserves all local behavior.
+    cluster_executor: dict | None = None
+
+    @field_validator("cluster_executor", mode="before")
+    @classmethod
+    def _cluster_executor(cls, value):
+        from looplab.core.cluster import normalize_executor
+        return normalize_executor(value)
+
+    @field_validator("best_of_n_pilot", mode="before")
+    @classmethod
+    def _best_of_n_pilot(cls, value):
+        from looplab.core.best_of_n import normalize_pilot
+        return normalize_pilot(value)
+
     # D10 list-wise best-of-N selection: when the top static-scorers TIE, break the tie with a
     # comparative LLM selection over the candidates presented together (+~3 pts vs pointwise on
     # GAIA, arXiv:2506.12928). The static score stays the primary filter — the LLM is a weak
@@ -3734,6 +3744,16 @@ class Settings(BaseSettings):
         self._check_case_insensitive_enum_fields()
         self._check_member_fields()
         self._check_llm_profiles()
+        if self.best_of_n_pilot is not None and (
+                self.backend != "llm" or self.external_harness or not 2 <= self.best_of_n <= 8
+                or self.developer_backend != "default"):
+            raise ValueError("best_of_n_pilot requires backend=llm, best_of_n=2..8 and the default in-process developer")
+        if self.cluster_executor is not None and (
+                self.trust_mode != 'trusted_local' or self.external_harness or self.eval_parallel != 1 or self.confirm_top_k
+                or self.confirm_seeds or self.ablate_every or self.ablate_code_blocks or self.eval_canary
+                or self.sandbox_memory_local or self.sandbox_fsize_local or self.eval_noise_seeds
+                or self.noise_floor_mid_search):
+            raise ValueError('cluster_executor requires trust_mode=trusted_local and eval_parallel=1, without external harness, confirmations/noise-floor, ablations, eval canary or local rlimit options')
         if self.external_harness and self.backend != "toy":
             raise ValueError("external_harness requires backend=toy; the external agent owns reasoning")
         return self
@@ -3923,6 +3943,9 @@ SNAPSHOT_DOCUMENT_KEYS = frozenset({CONFIG_SNAPSHOT_SCHEMA_KEY})
 # means adding its row here in the same change, or every snapshot that carries it stops resuming;
 # `tests/test_config.py` holds this list and the live fields disjoint.
 RETIRED_SETTINGS: dict[str, str] = {
+    "cross_run_structured_claims": (
+        "retired 2026-11-11: structured claim identity is unconditional; old snapshots remain readable, "
+        "but this no-op is no longer a Settings or UI field"),
     "inline_repair_stuck_repeat": (
         "retired 2026-08-05: the per-signature anti-stuck count gave way to the crash-triage "
         "model's `abandon` verdict under the hard `inline_repair_attempts` cap"),
@@ -3963,6 +3986,10 @@ def unknown_snapshot_keys(data) -> list[str]:
 # Keep their historical effective behavior when newer product defaults become active: re-entry must not
 # silently add paid calls, interventions, concurrency or a different selection policy to an old run.
 LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
+    # Pre-field snapshots did not select this extra-execution method; do not import
+    # a server's ambient pilot declaration into historical native runs.
+    "best_of_n_pilot": None,
+    "cluster_executor": None,
     # THE CANARY GATE (doc 73 §4.2 G5), added 2026-10-08 defaulting `canary`: a resumed pre-field run
     # keeps doc 72's paired full repetitions — also on its stopped lane — whatever its task declares.
     "upstream_verify": "full",
@@ -4073,7 +4100,6 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "graded_novelty": False,
     "cross_run_concepts": False,
     "cross_run_advisory": False,
-    "cross_run_structured_claims": False,
     "cross_run_curation": False,
     # Before task faceting gained its own scheduling switch, `cross_run_curation=True` always ran
     # the facet steward. A snapshot that lacks this field must resume that same treatment. This is

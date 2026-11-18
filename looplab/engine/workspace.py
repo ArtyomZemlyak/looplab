@@ -42,6 +42,37 @@ def _run_relative(workdir, run_dir):
     return None
 
 
+def retry_input_preflight(node, workdir, *, run_dir=None, operation: str = "rematerialize") -> None:
+    """Validate explicit `node.resume_inputs` BEFORE `WorkspaceSeeder.materialize` removes `workdir`
+    (doc 84 §6.2, incident F9). Raises `RetryInputPreflightError` before any unlink/rmtree when a
+    declared dependency lies inside (or symlinks into) the disposable workdir, is missing, has
+    attempt/receipt drift, or fails sha256 verification."""
+    resume_inputs = getattr(node, "resume_inputs", None)
+    if not resume_inputs:
+        return
+    from looplab.core.retry_inputs import RetryInputPreflightError, preflight_resume_inputs
+
+    try:
+        err = preflight_resume_inputs(
+            resume_inputs,
+            workdir=Path(workdir),
+            run_dir=Path(run_dir) if run_dir is not None else None,
+            node_id=getattr(node, "id", None),
+            current_attempt=getattr(node, "attempt", None),
+            phase=operation,
+        )
+    except ValueError as exc:
+        raise RetryInputPreflightError({
+            "code": "invalid_resume_input",
+            "operation": operation,
+            "node_id": getattr(node, "id", None),
+            "message": str(exc),
+            "retryable": False,
+        }) from exc
+    if err is not None:
+        raise RetryInputPreflightError(err)
+
+
 # THE NODE'S OWN BUILT SOURCE, and it is deliberately NOT one of the two fingerprints below.
 # `_dir_fingerprint` (triage.py) answers "git HEAD, else (relpath, size, mtime_ns)", and BOTH of its
 # branches are wrong for comparing a built node against the parent it claims to modify:
@@ -512,6 +543,10 @@ class WorkspaceSeeder:
         run_dir = resolve_settled(self._e.run_dir)
         if wd == run_dir or run_dir not in wd.parents:
             raise ValueError(f"refusing to materialize outside the run directory: {wd}")
+        from looplab.engine.attempt_logs import archive_attempt_logs, is_lifecycle_workdir
+        lifecycle_wd = is_lifecycle_workdir(wd, getattr(authored_node, "id", None))
+        if lifecycle_wd:
+            retry_input_preflight(authored_node, wd, run_dir=run_dir, operation="rematerialize")
         # A fresh lifecycle must start from the canonical seed + current node manifest, not an overlay
         # on files left by a previous generation. Stage-scoped reuse deliberately bypasses this method
         # in EvaluateMixin; every actual materialization is therefore safe to rebuild from scratch.
@@ -523,12 +558,14 @@ class WorkspaceSeeder:
             # dir is materialized through this same method, and archiving its logs filed them as
             # the NODE's earlier attempts — each one counted toward `MAX_ARCHIVES_PER_NODE` and
             # pruned a real archive of the node's own failure.
-            from looplab.engine.attempt_logs import archive_attempt_logs, is_lifecycle_workdir
-            if is_lifecycle_workdir(wd, getattr(authored_node, "id", None)):
+            if lifecycle_wd:
                 archive_attempt_logs(run_dir, wd, getattr(authored_node, "id", 0),
                                      getattr(authored_node, "attempt", None))
             # Read-only-aware: a workdir seeded from a git clone holds read-only pack files, which
             # Windows refuses to unlink — a second materialization of the same node failed there.
+            # Archiving may block on I/O: re-observe declarations at the destructive boundary.
+            if lifecycle_wd:
+                retry_input_preflight(authored_node, wd, run_dir=run_dir, operation="rematerialize")
             rmtree_readonly_aware(wd)
         if upstream_plan and (node.files != authored_node.files or node.deleted != authored_node.deleted):
             self._e.store.append("node_overlay_rebased", {"node_id": node.id, "generation": node.attempt,

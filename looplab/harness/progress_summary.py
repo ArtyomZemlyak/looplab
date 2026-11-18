@@ -159,14 +159,24 @@ def brief(progress: dict) -> dict:
             "candidate_requirements", "finish_reviews_due", "finish_report_due",
             "pending_checkpoint_count")
     result = {key: progress[key] for key in keys}
+    if "unreviewed_monitor_count" in progress:
+        result["unreviewed_monitor_count"] = progress["unreviewed_monitor_count"]
     if "report_authoring" in progress:
         result["report_authoring"] = progress["report_authoring"]
     if "agent_activity" in progress:
         result["agent_activity"] = progress["agent_activity"]
+    if "external_telemetry" in progress:
+        result["external_telemetry"] = progress["external_telemetry"]
+    if "external_work_state" in progress:
+        result["external_work_state"] = progress["external_work_state"]
     if "operator_directions" in progress:
         result["operator_directions"] = progress["operator_directions"]
+    if "work_intents" in progress:
+        result["work_intents"] = progress["work_intents"]
     if "canary_preflight" in progress:
         result["canary_preflight"] = progress["canary_preflight"]
+    if "current_evaluator_digest" in progress:
+        result["current_evaluator_digest"] = progress["current_evaluator_digest"]
     nodes = progress["finish_pending_nodes"]
     result.update(finish_pending_nodes=nodes[:20], finish_pending_node_count=len(nodes),
                   finish_pending_nodes_truncated=len(nodes) > 20)

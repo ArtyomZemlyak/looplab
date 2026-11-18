@@ -27,6 +27,10 @@ def research_map_cli(
     generation: str = typer.Option(..., "--generation", help="Current run generation."),
     offset: int = typer.Option(0, "--offset", min=0),
     limit: int = typer.Option(20, "--limit", min=1, max=100),
+    collection: list[str] = typer.Option([], "--collection", help="Collection or summary to read; repeatable."),
+    cursors: Optional[str] = typer.Option(None, "--cursors", help="JSON object of exact collection next_cursor tokens."),
+    max_bytes: int = typer.Option(65536, "--max-bytes", min=4096, max=65536),
+    max_items: int = typer.Option(40, "--max-items", min=1, max=100),
     briefing: bool = typer.Option(False, "--briefing", help="Show current action context instead of the map page."),
 ) -> None:
     """Read the bounded research map without starting or changing work."""
@@ -38,10 +42,16 @@ def research_map_cli(
             from looplab.harness.briefing import snapshot as briefing_snapshot
             result = briefing_snapshot(Path(run_dir), generation)
         else:
-            result = snapshot(Path(run_dir), generation, offset, limit)
+            try:
+                continuation = json.loads(cursors) if cursors is not None else None
+            except (ValueError, TypeError) as exc:
+                raise CliRefusal("Invalid research-map cursors JSON") from exc
+            result = snapshot(Path(run_dir), generation, offset, limit,
+                              collections=collection or None, cursors=continuation,
+                              max_bytes=max_bytes, max_items=max_items)
     except HTTPException as exc:
         raise CliRefusal(str(exc.detail)) from exc
-    typer.echo(json.dumps(result, ensure_ascii=False))
+    typer.echo(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
 
 
 @app.command(name="harness-mcp")
@@ -235,3 +245,78 @@ def agent_events_cmd(
 
     typer.echo(json.dumps(read_outbox(run_root, after=after, run_id=run, limit=limit),
                           ensure_ascii=False, indent=1))
+
+
+@app.command(name="skill-distill")
+def skill_distill(
+    run_id: str = typer.Argument(..., help="Run containing the current supported lesson."),
+    repo: str = typer.Option(..., "--repo", help="Existing local external repository; no fetch."),
+    revision: str = typer.Option(..., "--revision", help="Exact full Git commit SHA."),
+    source_file: list[str] = typer.Option(..., "--source-file", help="Selected pinned text blob; repeatable."),
+    label: str = typer.Option(..., "--label", help="Public source label."),
+    generation: str = typer.Option(..., "--generation"),
+    action_id: str = typer.Option(..., "--action-id"),
+    lesson_action_id: str = typer.Option(..., "--lesson-action-id"),
+    body_file: str = typer.Option(..., "--body-file", help="Agent-authored transferable technique, applicability and limits."),
+    smoke_file: str = typer.Option(..., "--smoke-file", help="CPU-only Python assertions against selected source files."),
+    exclusion_review: str = typer.Option(..., "--exclusion-review", help="Authored review of task-specific contamination."),
+    exclude: list[str] = typer.Option([], "--exclude", help="Additional exact task/article/artifact term; repeatable."),
+    source_url: Optional[str] = typer.Option(None, "--source-url", help="Public HTTPS citation only, never fetched."),
+    publish: bool = typer.Option(False, "--publish", help="Validate and publish through the native skill-candidates API."),
+    url: Optional[str] = typer.Option(None, "--url", help="Existing LoopLab server; required with --publish."),
+) -> None:
+    """Package a pinned external technique; native execution and evidence govern admission.
+
+    Drafting is done by the external reasoning owner; this command makes no model call.
+    Default output is a request preview, not a validation or publication receipt.
+    """
+    import re
+    from pathlib import Path
+    from looplab.engine.external_skill_source import collect_git_source
+    from looplab.serve.routers.runs import ExternalSkillBody
+    try:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}", run_id):
+            raise ValueError("invalid_run_id")
+        def bounded_text(path, cap):
+            with Path(path).open("rb") as stream:
+                raw = stream.read(cap + 1)
+            if len(raw) > cap:
+                raise ValueError("external_skill_input_exceeds_byte_budget")
+            return raw.decode("utf-8")
+        body = ExternalSkillBody(expected_generation=generation, action_id=action_id,
+            lesson_action_id=lesson_action_id, body=bounded_text(body_file, 64000),
+            external_source=collect_git_source(repo, revision, source_file, label=label, url=source_url),
+            validation_code=bounded_text(smoke_file, 32000), excluded_terms=exclude,
+            exclusion_review=exclusion_review)
+        from looplab.harness.skills import parse_external_skill_request
+        parse_external_skill_request(body)
+        route = f"/api/runs/{run_id}/skill-candidates"
+        payload = body.model_dump(exclude_none=True)
+        if publish:
+            if not url:
+                raise ValueError("publish_requires_explicit_existing_server_url")
+            from looplab.harness.mcp_server import HarnessAPI, stdio_credential
+            api = HarnessAPI(url, stdio_credential())
+            try:
+                result = api.request("POST", route, body=payload)
+            finally:
+                api.client.close()
+            typer.echo(json.dumps(result, ensure_ascii=False))
+            receipt = result.get("body")
+            skill = receipt.get("skill") if isinstance(receipt, dict) else None
+            source_ack = skill.get("external_source") if isinstance(skill, dict) else None
+            if (result.get("status") != 200 or result.get("outcome") == "unknown"
+                    or not isinstance(receipt, dict) or receipt.get("ok") is not True
+                    or not isinstance(source_ack, dict) or source_ack.get("passed") is not True
+                    or source_ack.get("source_sha256") != payload["external_source"]["snapshot_sha256"]
+                    or not isinstance(source_ack.get("artifact_sha256"), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", source_ack["artifact_sha256"]) is None
+                    or not isinstance(source_ack.get("artifact_ref"), str)
+                    or re.fullmatch(r"external_skill_sources/[0-9a-f]{64}\.json", source_ack["artifact_ref"]) is None):
+                raise typer.Exit(2)
+        else:
+            typer.echo(json.dumps({"validated": False, "published": False,
+                "route": route, "body": payload}, ensure_ascii=False))
+    except (ValueError, OSError) as exc:
+        # Paths, Git stderr and validation-source text are not a usage-error payload.
+        raise CliRefusal("External skill request refused: check pinned source, bounded inputs and required options") from exc

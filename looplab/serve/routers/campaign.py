@@ -38,16 +38,14 @@ class AmendmentBody(BaseModel):
         return payload
 
 
-class PerQueryUploadBody(BaseModel):
-    """A terminal node's per-query evaluation arrays on one shared test set."""
+class PerQueryMetadataBody(BaseModel):
+    """Metadata only: it grants no payload, test-identity or scientific attestation."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
     action_id: str = Field(min_length=1, max_length=160)
     node_id: int = Field(ge=0)
     format: Literal["npz", "json"] = "npz"
-    content_b64: Optional[str] = None
-    workdir_path: Optional[str] = Field(default=None, max_length=1024)
     query_key: str = Field(default="keys", min_length=1, max_length=128)
     cluster_key: Optional[str] = Field(default="users", max_length=128)
     metrics: dict[str, dict[str, Any]]
@@ -56,8 +54,20 @@ class PerQueryUploadBody(BaseModel):
     arm: Optional[str] = Field(default=None, max_length=64)
     measured_check: Optional[dict[str, Any]] = None
 
+    expected_attempt: Optional[int] = Field(default=None, ge=0, strict=True)
+
+
+class PerQueryUploadBody(PerQueryMetadataBody):
+    """A terminal node's per-query evaluation arrays on one shared test set."""
+
+    content_b64: Optional[str] = None
+    workdir_path: Optional[str] = Field(default=None, max_length=1024)
+
     def request_payload(self, source_sha256: str) -> dict:
         payload = self.model_dump(exclude={"expected_generation", "content_b64"})
+        # An additive fence cannot change digests of historical accepted/spooled requests.
+        if self.expected_attempt is None:
+            payload.pop("expected_attempt", None)
         payload["source_sha256"] = source_sha256
         return payload
 
@@ -118,6 +128,14 @@ def build_router(srv) -> APIRouter:
         """Set the agent's amendment level and node cap (the agent token is refused here)."""
         from looplab.harness.campaign import write_policy
         return write_policy(_run_dir(run_id), body.model_dump())
+
+    @router.post("/api/runs/{run_id}/per-query/preflight")
+    async def preflight_per_query(run_id: str, body: PerQueryMetadataBody, request: Request):
+        """Check metadata before reading arrays. The upload rechecks under its write fences."""
+        from looplab.harness.per_query import upload_preflight
+        agent = request_agent_token(request)
+        return await anyio.to_thread.run_sync(
+            lambda: upload_preflight(_run_dir(run_id), body, agent_token=agent))
 
     @router.post("/api/runs/{run_id}/per-query")
     async def post_per_query(run_id: str, body: PerQueryUploadBody, request: Request):

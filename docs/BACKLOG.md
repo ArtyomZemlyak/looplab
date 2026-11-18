@@ -736,14 +736,11 @@ site that proves it is open.
     `orchestrator.py:2885`, not `:2966`; and `per_experiment_gpu_budget` is DEFINED in
     `engine/widths.py`, merely imported by `proposal_cues.py`. Four dead citations in one entry, the
     exact rot `claimpin.LINE_CITATION` was written to refuse.
-    OPEN[eval-parallelism-is-in-process-only] evals are bounded by one host's in-process task group;
-    there is no cross-machine dispatcher. This is not a ceiling of two GPUs: the task may declare
-    any allowed local device footprint. This overlaps `no-cluster-executor`; keep remote-platform
-    acceptance distinct from local CPU worker tests (review 2026-11-17).
-    proof:`present:res = await anyio.to_thread.run_sync(@looplab/engine/evaluate.py`
-    *Mutated before it was written:* True as shipped, False the moment that import lands. Re-pointed
-    2026-09-06 (doc 52 §2.2): `import ray` named one library of several; the line that decides the
-    item is the in-process thread hop every eval runs through, which any dispatcher replaces.]
+    *Merged 2026-11-10:* `eval-parallelism-is-in-process-only` and doc 70 §70.7's
+    `no-cluster-executor` required the same cross-machine executor; the latter now owns the
+    [acceptance protocol](audit/cluster-executor-acceptance.md). The later CPU stdio worker implementation does not establish remote placement/platform acceptance.
+    Local evaluation parallelism already exists. A thread hop is compatible with either a local or
+    remote implementation, and the historical "second H200" sentence is not a hardware ceiling.]
 19. ~~**[added 2026-08-14] Claim ratification ignores node feasibility and trust flags (P1, S).**~~
     **[FIXED 2026-08-15, VERIFIED 2026-08-21 — this entry outlived its defect by six days.**
     The entry prescribed the fix by name: "reuse that exact join — `engine/metric_salvage.py::
@@ -4633,7 +4630,7 @@ What makes it expensive is WHEN it happens: at `n == 0` no node exists, so every
 idle for the whole phase — this is not one long turn among many, it is dead time at the front of
 every run. v3 spent **2 hours 18 minutes** there and then died with three nodes and no metric.
 
-OPEN[first-propose-runs-with-every-gpu-idle] the run-opening think and the first propose still run serially with every GPU idle; `looplab timings` now PRICES that split per run, and no GPU-shaped bench run has produced one yet. proof:`present:def _ground_run_start@looplab/engine/research_cadence.py`
+OPEN[first-propose-runs-with-every-gpu-idle] in the built-in researcher path with run-opening research enabled, the initial think precedes the first proposal and eval. No matched GPU-shaped corpus measurement of this startup split is recorded here. External-agent preparation is a separate path; this is not evidence that every GPU on a host must be idle. proof:`present:def _ground_run_start@looplab/engine/research_cadence.py`
 
   NOT a cadence fix and not a prompt fix. The lever is overlap: `_ground_run_start` and the first
   propose both run before any node exists, serially, on the loop thread. Measure the split between
@@ -7229,6 +7226,8 @@ in **Running** for months because one of two hundred experiments under it happen
 The own-level/child split the design demands as a recorded FACT also exists: `Card.evidence` is the
 experiments testing THIS claim, `child_rollup.nodes` is the descendants' — two fields, never summed.
 
+**Historical trigger rationale (Aug–Sep2026; superseded by the explicit premise contract below).**
+
 **Rule 3 is unimplemented AND unfirable, which is why it was not built.** `undercut` appears nowhere
 in `looplab/` or `ui/src/`. Measured 2026-08-26 by folding every `runs/**/events.jsonl`: **691 cards,
 of which exactly ONE has a child** — ladder depth histogram `{0: 690, 1: 1}` — and **ZERO parents
@@ -7240,13 +7239,13 @@ would ship machinery with zero possible firings, which is the `_MemoOut` inert-f
 neighbour) approached from the other side: there a prompt named a field the schema lacked, here the
 code would name a state the board cannot enter.
 
-OPEN[claim-refutation-undercut] refutation does not flow DOWN as undercut — a parent whose own experiments failed leaves its children unmarked. THE TRIGGER IS NOW EVALUABLE BY COMMAND: `looplab card-ladder <runs-root>` (`events/card_ladder.py`) folds every run's own log and reports the ladder depth histogram, the parents with children, and every card carrying BOTH `child_card_ids` and a non-empty `evidence` — printing TRIGGER FIRED or NOT FIRED. MEASURED 2026-09-18 it prints NOT FIRED (303 cards, 31 edges) for a STRUCTURAL reason, and the trigger is restated over the (parent, child-evidence) pair, which fires 17 of 17 — see the paragraph below. proof:absent:undercut@looplab/events/card_ledger.py
+**Ревизия и локальная реализация 2026-11-12 (`claim-refutation-undercut`):** исторический trigger ниже измерял вложенность исследовательских направлений, а не логическую предпосылку; `tested` также не является опровержением. Автоматическое наследование такого «опровержения» было бы ошибкой. Теперь отдельный native `claim_reviewed` явно объявляет логические предпосылки и авторскую оценку на собственных usable measured evidence subject Card. Immutable seed и native attempt/source/metric/protocol/objective receipts перепроверяются strict-tail CAS перед публикацией. Только прямая явно объявленная предпосылка с текущей authored refutation даёт advisory undercut; дочерние измерения, вердикты, champion и gates не меняются. Сброс/смена свидетельств, неподдерживаемый последний review и импортированные циклы дают stale/unavailable, не восстановление старого вывода. [Контракт и приёмка](audit/claim-premise-review.md): actual CPU evaluator, command/HTTP/restart/replay/CAS race и read-only UI. Исторические измерения и refused trigger сохранены; научная корректность авторских оценок и production utility не доказаны, live не обновлён.
 
 *The measurement behind `claim-refutation-undercut`, 2026-09-18:* on the dense-retrieval corpus (`runs/`, 11 run dirs): **303 cards, 31 parent/child edges, max depth 1, TRIGGER NOT FIRED** — not one card carries both `child_card_ids` and a non-empty `evidence`, so the undercut rule would have zero possible firings. AND THE REASON IS STRUCTURAL RATHER THAN A THIN CORPUS, which is what this measurement adds: `engine/research_cadence.py::_admissible_beliefs` states that a direction NEVER carries evidence — since the `parent_card_id` edge shipped, the experiments answering a direction are CHILD cards with evidence of their own, so a direction stays evidence-free for the whole run BY DESIGN. The trigger as written therefore describes a shape the board's own rule forbids, and no amount of further corpus will print FIRED. **DECIDED 2026-09-18, and the decision is a RESTATEMENT with its own number.** The trigger is restated over the PAIR — *a card with `child_card_ids` at least one of whose CHILDREN carries evidence* — and re-measured on the same corpus: **17 parents, 17 FIRING, i.e. every direction card that has children has an evidenced child.** So the rule's subject exists and always did; what did not exist was a card holding both fields at once, which the board forbids. The old one-card form is refused permanently (see the DECLINED marker beside this one) and the gate this entry set — 'do not build until FIRED' — is now OPEN on the restated form. The derivation itself is NOT built in the same change: it is a fold change in `events/card_ledger.py`, i.e. replay-affecting, and it owes its own tests and its own measurement of what it would mark. Edges exist only in v11/v12/v13 (18/6/7); the other eight runs have zero, so the edge itself is recent and the 17 are all from three runs.
 
 DECLINED[undercut-trigger-on-one-cards-two-fields] the undercut trigger spelled as *one card carrying BOTH `child_card_ids` and a non-empty `evidence`* is refused permanently, not postponed: `engine/research_cadence.py::_admissible_beliefs` states that a direction NEVER carries evidence — the experiments answering it are CHILD cards with evidence of their own — so the shape is forbidden by the board's own rule and no corpus can produce it. measured: `looplab card-ladder runs` over 11 run dirs — 303 cards, 31 edges, max depth 1, 0 cards with both fields; the same corpus fires 17 of 17 on the (parent, child evidence) restatement — docs/BACKLOG.md
 
-**The trigger, stated so nobody has to re-derive it:** build rule 3 when a fold produces a card with
+**Historical one-Card trigger statement (superseded, not a current instruction):** build rule 3 when a fold produces a card with
 BOTH `child_card_ids` and a non-empty `evidence`. Until then the ladder is one edge deep and the
 prohibitions that matter are already enforced. `looplab card-ladder <runs-root>` evaluates that
 sentence over a corpus and prints FIRED / NOT FIRED, so "is it time yet?" is a command rather

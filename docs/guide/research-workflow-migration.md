@@ -21,6 +21,32 @@ For a local run, `looplab research-map RUN_DIR --generation TOKEN` reads a page 
 supervisor and labels that observation unavailable. API/MCP/UI use the connected server for it.
 Independent source reads are not atomic; a mismatched event prefix requires refresh before action.
 
+## Bounded research reads
+
+Connection bootstrap uses a small `/harness-identity` whitelist, followed by generation-fenced handoff
+and compact progress; it does not fetch full run state. Research map API, MCP, local CLI and UI share a
+whole-response limit of 65536 UTF-8 JSON bytes by default (also the maximum), 40 items by default
+(maximum 100), and at most 20 rows per collection. Smaller requests support `max_bytes >= 4096`.
+The `response_budget` reports the exact compact JSON byte count, returned/shortened item counts,
+`limited` and named `omitted_sections`. Required identity and source-health metadata are never silently
+removed; a request too small for them fails explicitly. Oversized row details become visibly shortened
+records, retaining a bounded identity when available; source journals and full object routes remain
+independent authoritative reads.
+
+Select collection/summary names with repeated API `collections`, MCP `collections`, or repeated CLI
+`--collection`. An envelope with `selected:false` is unrequested, not an empty source. Each collection
+has its own `next_cursor`, `offset`, `returned_count`, `has_more` and total. Supply an object of exact
+tokens as API/CLI JSON `cursors` or MCP `cursors`; never advance all offsets by 20 when a byte or item
+budget returned unequal counts. The UI carries these cursors and offers separate omitted-summary reads.
+Legacy `offset` is accepted for explicit random access; precise continuation uses cursors.
+
+A cursor binds run address, UID, generation, collection name and its exact sanitized row projection.
+A changed collection returns 409 and requires an explicit fresh first page; unrelated collection
+changes do not invalidate its token. Tokens are read provenance, never execution permission. Paging
+bounds the response, not the CPU or memory needed to fold existing sources, and does not make the
+independent sources atomic. Historical report paging includes versions beyond the old 200-row display
+cutoff. [CPU/UI acceptance](../audit/external-read-bounds.md) records the isolated implementation.
+
 ## Old data and reports
 
 Old events, source snapshots, uploads and report versions remain authoritative and are never
@@ -45,6 +71,23 @@ node attempt and declare a test/cohort/policy; labels remain author declarations
 not by itself prove identical ground truth or policy. Missing metrics are shown unavailable, not zero.
 
 ## Notifications and recovery
+
+Publish scoped directions through the existing command endpoint, for example
+`{"type":"hint","data":{"directive_id":"size-v1","topic":"capacity","text":"Prepare the new size","status":"active"},"expected_generation":"TOKEN"}`
+with an idempotency key. To correct that topic use a new ID and `supersedes:["size-v1"]`. To finish
+it, name its ID/topic with `status:"completed"` or `"cancelled"`; optional text explains the retirement.
+Read current directions first: a topic changed since observation is refused rather than overwritten.
+Retired instructions leave current context and their old IDs cannot be revived by late reminders.
+Legacy `replace:true` remains an explicit global replacement. See the
+[direction lifecycle acceptance](../audit/operator-direction-lifecycle.md).
+
+Authored recovery notes are optional native `agent_checkpointed` commands with a bounded
+`external_work_state` (goal, last_completed, next_step, blocker/owner, declared revision and unfinished
+artifact/claim references). Existing private saved commands/actions retain the exact original requests.
+Progress/briefing exposes the latest external note, current-context comparison and a supported read of
+the original pure command receipt or fresh progress. A changed context withholds its old next-step
+suggestion. Declared artifact or harness identities are not attestations, and no note launches work or
+adds an admission gate. See [native recovery acceptance](../audit/external-work-state-recovery.md).
 
 The existing outbox, wait cursor and configured hook remain the delivery path. If a named hook has
 an explicit event-kind filter, add `agent_handoff` and `operator_direction` where desired. Addressed

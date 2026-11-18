@@ -8,8 +8,12 @@ from pathlib import Path
 import orjson
 from fastapi import HTTPException
 
-from looplab.core.atomicio import append_jsonl_bytes_locked
+from looplab.core.atomicio import append_jsonl_bytes_locked, atomic_write_text
+from looplab.core.jsonutil import canonical_json_digest
+from looplab.engine.external_skill_source import (normalize_source, exclusion_policy, check_exclusions,
+    validate_external_skill_source)
 from looplab.core.models import NodeStatus
+from looplab.core.fitness import is_usable_metric
 from looplab.engine.lessons_reconcile import LessonReconcileMixin
 from looplab.engine.memory import assess_skill_statement, unreliable_metric_ids, write_auto_skill
 from looplab.events.eventstore import EventStoreLockError, interprocess_lock
@@ -19,7 +23,51 @@ from looplab.events.run_generation import run_generation_token
 from looplab.tools.skills import parse_skill_frontmatter
 
 
+def parse_external_skill_request(body):
+    source = getattr(body, "external_source", None)
+    code = getattr(body, "validation_code", None)
+    terms = getattr(body, "excluded_terms", None)
+    review = getattr(body, "exclusion_review", None)
+    if source is None and code is None and terms is None and review is None:
+        return None
+    try:
+        source = normalize_source(source)
+        # Native task identity is added during both sequenced evidence checks.
+        exclusion_policy("request-shape-check", terms, review_reason=review)
+        if not isinstance(code, str) or not code.strip() or len(code.encode("utf-8")) > 32000:
+            raise ValueError("invalid_external_skill_validation")
+        return {"source": source, "validation_code": code, "excluded_terms": terms,
+                "exclusion_review": review}
+    except (ValueError, UnicodeError) as exc:
+        raise HTTPException(422, {"code": "invalid_external_skill_source"}) from exc
+
+
+_external_request = parse_external_skill_request
+
+
 def publish_skill_candidate(srv, rd: Path, body) -> dict:
+    external = parse_external_skill_request(body)
+    if external is None:
+        return _publish(srv, rd, body)
+    # Preflight and exact replay before any payload execution. CPU smoke never holds
+    # the command sequencer or the cross-run memory/lesson writer locks.
+    preflight = _publish(srv, rd, body, external=external, preflight=True)
+    if preflight.get("ok"):
+        return preflight
+    policy = exclusion_policy(preflight["task_id"], external["excluded_terms"],
+                              review_reason=external["exclusion_review"])
+    try:
+        checked = validate_external_skill_source(external["source"], external["validation_code"],
+            policy, protected_roots=[str(rd), str(preflight["memory_dir"])])
+    except ValueError as exc:
+        raise HTTPException(422, {"code": "external_skill_source_excluded"}) from exc
+    if checked["passed"] is not True:
+        raise HTTPException(422, {"code": "external_skill_smoke_failed", "validation": checked})
+    return _publish(srv, rd, body, external=external,
+                    verified={"preflight": preflight, "validation": checked, "policy": policy})
+
+
+def _publish(srv, rd: Path, body, *, external=None, preflight=False, verified=None) -> dict:
     """Join a portable technique to a current supported lesson and write one skill.
 
     The agent chooses whether and what to distill. The server selects the evidence,
@@ -44,6 +92,8 @@ def publish_skill_candidate(srv, rd: Path, body) -> dict:
 
             payload = {"generation": generation, "lesson_action_id": body.lesson_action_id,
                        "body": body.body.strip()}
+            if external is not None:
+                payload["external_import"] = external
             digest = hashlib.sha256(orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)).hexdigest()
             base = Path(memory_dir)
             receipts = base / "skill_candidate_actions.jsonl"
@@ -90,16 +140,56 @@ def publish_skill_candidate(srv, rd: Path, body) -> dict:
                     if not isinstance(fingerprint, list) or not all(
                             isinstance(term, str) for term in fingerprint):
                         raise HTTPException(409, "lesson fingerprint is invalid")
+                    external_metadata = None
+                    if external is not None and any(not is_usable_metric(state.nodes[nid].metric)
+                                                    for nid in evidence):
+                        raise HTTPException(409, "external skill requires finite measured lesson evidence")
+                    if external is not None:
+                        policy = exclusion_policy(state.task_id, external["excluded_terms"],
+                                                  review_reason=external["exclusion_review"])
+                        try:
+                            check_exclusions(external["source"], policy,
+                                extra_text=body.body + "\n" + external["validation_code"])
+                        except ValueError as exc:
+                            raise HTTPException(422, {"code": "external_skill_source_excluded"}) from exc
+                        binding = {"run_uid": state.run_uid, "generation": generation,
+                            "task_id": state.task_id, "memory_dir": str(base),
+                            "objective_key": state.objective_key, "direction": state.direction, "goal": state.goal,
+                            "lesson_sha256": canonical_json_digest(source),
+                            "evidence_sha256": canonical_json_digest({str(nid): state.nodes[nid].model_dump(mode="json")
+                                                                      for nid in evidence}),
+                            "policy_sha256": canonical_json_digest(policy), "payload_sha256": digest}
+                        if preflight:
+                            return binding
+                        if verified is None or verified["preflight"] != binding:
+                            raise HTTPException(409, {"code": "external_skill_evidence_changed"})
+                        artifact = {"schema": "looplab.external-skill-import/v1",
+                            "request": external, "policy": policy, "binding": binding,
+                            "validation": verified["validation"]}
+                        # Source snapshots live OUTSIDE skills/: a selected SKILL.md can
+                        # never be discovered as an unreviewed manual skill.
+                        relative = "external_skill_sources/" + digest + ".json"
+                        target = base / relative
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        artifact_text = json.dumps(artifact, ensure_ascii=False, sort_keys=True)
+                        atomic_write_text(target, artifact_text)
+                        external_metadata = {"source_sha256": external["source"]["snapshot_sha256"],
+                            "artifact_sha256": hashlib.sha256(artifact_text.encode()).hexdigest(),
+                            "artifact_ref": relative, "passed": True}
                     written = write_auto_skill(
                         base / "skills", assessment.statement, body.body, fingerprint,
                         state.task_id, classifier_version="external-evidence-v1",
-                        source_statement=statement)
+                        source_statement=statement,
+                        **({"external_source_sha256": external_metadata["source_sha256"]}
+                           if external_metadata is not None else {}))
                     if written is None:
                         raise HTTPException(503, {"code": "skill_store_unavailable"})
                     metadata = parse_skill_frontmatter(written.read_text(encoding="utf-8"))
                     skill = {"name": metadata.get("name"), "status": metadata.get("status"),
                              "claim_sha256": metadata.get("claim_sha256"),
                              "source_statement_sha256": metadata.get("source_statement_sha256")}
+                    if external_metadata is not None:
+                        skill["external_source"] = external_metadata
                     append_jsonl_bytes_locked(receipts, orjson.dumps({
                         "run_uid": state.run_uid, "run_id": state.run_id,
                         "action_id": body.action_id, "payload_sha256": digest,

@@ -44,7 +44,7 @@ from looplab.events.eventstore import EventStore, EventStoreLockError, interproc
 from looplab.events.replay import fold
 from looplab.events.run_generation import run_generation_token
 from looplab.harness.campaign import (METRIC_RE, SLUG_RE, author_of, experiments_of,
-                                      read_journal)
+                                      read_journal, journal_incomplete)
 from looplab.harness.journals import (history_incomplete, read_event_source, read_source,
                                       shape_checked)
 from looplab.trust import paired
@@ -230,13 +230,161 @@ def _replayed_upload(rd: Path, body, source_sha: str) -> Optional[dict]:
     return None
 
 
-def publish_upload(srv, rd: Path, body, *, agent_token: bool, auto_attempt=None) -> dict:
-    """Validate, reduce and store one node's per-query arrays; idempotent on `action_id`."""
+def _upload_context(rd: Path, body):
+    events = read_event_source(rd)
+    generation = run_generation_token(events)
+    if not generation or generation != body.expected_generation.lower():
+        raise HTTPException(409, {"code": "run_generation_changed",
+                                  "current_generation": generation})
+    state = fold(events)
+    protocol, health = read_journal(rd)
+    if not health["read_complete"]:
+        raise journal_incomplete(rd)
+    uploads, health = read_manifest(rd)
+    if not health["read_complete"]:
+        raise history_incomplete(manifest_path(rd), f"{PER_QUERY_DIR}/{MANIFEST}", _manifest_row)
+    return events, state, protocol, uploads
+
+
+def _arm_owner_conflict(body, owner, source):
+    """Explain an immutable score-vector ownership refusal, never repair the identity implicitly."""
+    return HTTPException(409, {
+        "code": "arm_bound_elsewhere",
+        "message": "The arm's declared score-vector owner differs from this upload node.",
+        "ownership_source": source,
+        "experiment_id": body.experiment_id, "arm": body.arm,
+        "owner": {"run_id": owner.get("run_id"), "node_id": owner.get("node_id")},
+        "submitted_node_id": body.node_id,
+        "remediation": {
+            "kind": "explicit_corrected_declaration", "supersedes": body.experiment_id,
+            "message": "Read the original declaration and genuine vector provenance. If the declaration names the wrong owner, "
+                       "register a new experiment_id with supersedes and a reason, "
+                       "binding the arm to the node that actually produced the score vectors. Keep checkpoint "
+                       "lineage separately as model_producer; reuse genuine saved vectors from the exact score "
+                       "attempt. The original declaration and accepted receipts remain immutable.",
+        },
+    })
+
+
+def _validate_upload_metadata(rd: Path, body, state, protocol, uploads, *, auto_attempt=None):
+    """ONE metadata rule, before payload work and again under the publication sequencer.
+
+    Payload geometry/labels/values are deliberately not claimed here. An action already recorded
+    in the manifest follows exact-source replay instead: current metadata cannot erase its receipt.
+    """
+    if not body.metrics or len(body.metrics) > 64:
+        raise HTTPException(400, "declare 1..64 metrics")
+    for name, spec in body.metrics.items():
+        if not METRIC_RE.fullmatch(name) or not isinstance(spec, dict):
+            raise HTTPException(400, f"metric {name!r}: invalid name or spec")
+        kind = spec.get("kind", "mean")
+        fields = {"array"} if kind == "mean" else {"num", "den"} if kind == "ratio" else None
+        if fields is None:
+            raise HTTPException(400, f"metric {name!r}: kind must be mean or ratio")
+        if set(spec) - (fields | {"kind", "columns"}):
+            raise HTTPException(400, f"metric {name!r}: unexpected metric spec field")
+        if any(not isinstance(spec.get(k), str) or not 1 <= len(spec[k]) <= 128 for k in fields):
+            raise HTTPException(400, f"metric {name!r}: declare nonempty array names")
+        columns = spec.get("columns", "all")
+        if columns not in (None, "all") and (
+                not isinstance(columns, list) or not columns or any(
+                    type(c) is not int or c < 0 for c in columns)):
+            raise HTTPException(400, f"metric {name!r}: columns must be 'all' or nonnegative indices")
+    if body.test_label is not None and not SLUG_RE.fullmatch(body.test_label):
+        raise HTTPException(400, "test_label must be a short slug")
+    if body.experiment_id is not None and not SLUG_RE.fullmatch(body.experiment_id):
+        raise HTTPException(400, "experiment_id must be a slug")
+    if (body.arm is None) != (body.experiment_id is None):
+        raise HTTPException(400, "arm and experiment_id are given together")
+    if body.measured_check is not None:
+        if (set(body.measured_check) - {"metric", "node_metric"}
+                or body.measured_check.get("metric") not in body.metrics):
+            raise HTTPException(400, "measured_check.metric must be an uploaded metric")
+        key = body.measured_check.get("node_metric")
+        if key is not None and (not isinstance(key, str) or len(key) > 128):
+            raise HTTPException(400, "measured_check.node_metric must be a metric name")
+    node = state.nodes.get(body.node_id)
+    if node is None or getattr(node, "tombstoned", False):
+        raise HTTPException(404, f"no node {body.node_id} in this run")
+    expected_attempt = getattr(body, "expected_attempt", None)
+    if ((auto_attempt is not None and node.attempt != auto_attempt)
+            or (expected_attempt is not None and node.attempt != expected_attempt)):
+        raise HTTPException(409, {"code": "node_attempt_changed",
+                                  "message": "node lifecycle changed before upload; read the actual attempt"})
+    status = getattr(node.status, "value", str(node.status))
+    if status not in ("evaluated", "failed") or node.terminal_event_seq is None:
+        raise HTTPException(409, {"code": "node_not_terminal",
+                                  "message": "upload per-query arrays for a terminal node"})
+    if body.experiment_id is not None:
+        exp = experiments_of(protocol, state.run_uid).get(body.experiment_id)
+        if exp is None:
+            raise HTTPException(404, f"no registered experiment {body.experiment_id!r}")
+        if body.arm not in exp["arms"]:
+            raise HTTPException(400, f"experiment {body.experiment_id!r} has no arm {body.arm!r}")
+        fixed = exp["arms"][body.arm]
+        if fixed.get("run_id") not in (None, Path(rd).name) or (
+                fixed.get("node_id") is not None and fixed["node_id"] != body.node_id):
+            raise _arm_owner_conflict(body, fixed, "registered_arm")
+        previous = next((u for u in uploads if u.get("run_uid") == state.run_uid
+                         and u.get("experiment_id") == body.experiment_id and u.get("arm") == body.arm
+                         and u.get("node_id") != body.node_id), None)
+        if previous is not None:
+            raise _arm_owner_conflict(body, previous, "accepted_upload")
+    return node
+
+
+def _check_upload_scope(rd: Path, agent_token: bool):
     from looplab.serve.control_validation import run_is_external
     if agent_token and not run_is_external(rd):
         raise HTTPException(403, {"code": "agent_token_refused",
                                   "message": "the agent token may upload only to an external_harness run",
                                   "retryable": False})
+
+
+def upload_preflight(rd: Path, body, *, agent_token: bool) -> dict:
+    """Read-only metadata receipt; no array reads, statistics, spool or domain writes."""
+    _check_upload_scope(rd, agent_token)
+    try:
+        events, state, protocol, uploads = _upload_context(rd, body)
+        prior = next((u for u in uploads if u.get("run_uid") == state.run_uid
+                      and u.get("action_id") == body.action_id), None)
+        if prior is not None:
+            # A saved receipt may outlive node reset/changed metadata. Only the real upload can
+            # verify the original source digest; this is not approval for new bytes under its ID.
+            return {"v": 1, "ok": True, "metadata_only": True, "mode": "exact_replay_only",
+                    "run_uid": state.run_uid,
+                    "generation": body.expected_generation.lower(), "upload_id": prior["upload_id"],
+                    "expected_attempt": prior.get("expected_attempt"),
+                    "payload_validation": "not_checked", "metadata_validation": "prior_receipt_only"}
+        node = _validate_upload_metadata(rd, body, state, protocol, uploads)
+        return {"v": 1, "ok": True, "metadata_only": True, "mode": "new_upload",
+                "run_uid": state.run_uid, "generation": body.expected_generation.lower(),
+                "event_seq": events[-1].seq, "node_id": node.id, "expected_attempt": node.attempt,
+                "node_terminal_seq": node.terminal_event_seq,
+                "protocol_version": max((r["version"] for r in protocol), default=0),
+                "payload_validation": "not_checked", "metadata_validation": "checked",
+                "consistency": {"status": "unchecked"}}
+    except HTTPException:
+        raise
+    except (OSError, EventStoreLockError, ValueError, KeyError) as exc:
+        raise HTTPException(503, "per-query metadata unavailable") from exc
+
+
+def publish_upload(srv, rd: Path, body, *, agent_token: bool, auto_attempt=None) -> dict:
+    """Validate, reduce and store one node's per-query arrays; idempotent on `action_id`."""
+    _check_upload_scope(rd, agent_token)
+    events, state, protocol, uploads = _upload_context(rd, body)
+    prior = next((u for u in uploads if u.get("run_uid") == state.run_uid
+                  and u.get("action_id") == body.action_id), None)
+    if prior is not None:
+        raw = _upload_bytes(rd, body)
+        source_sha = hashlib.sha256(raw).hexdigest()
+        replayed = _replayed_upload(rd, body, source_sha)
+        if replayed is not None:
+            return replayed
+        raise HTTPException(409, "upload action_id was reused with different content")
+    observed_node = _validate_upload_metadata(rd, body, state, protocol, uploads, auto_attempt=auto_attempt)
+    observed_attempt = observed_node.attempt
     raw = _upload_bytes(rd, body)
     source_sha = hashlib.sha256(raw).hexdigest()
     arrays = _arrays_from_payload(body.format, raw)
@@ -305,21 +453,11 @@ def publish_upload(srv, rd: Path, body, *, agent_token: bool, auto_attempt=None)
     path = manifest_path(rd)
     try:
         with srv.commands.sequence(rd):
-            events = read_event_source(rd)
-            generation = run_generation_token(events)
-            if not generation or generation != body.expected_generation.lower():
-                raise HTTPException(409, {"code": "run_generation_changed",
-                                          "current_generation": generation})
-            state = fold(events)
-            node = state.nodes.get(body.node_id)
-            if node is None or getattr(node, "tombstoned", False):
-                raise HTTPException(404, f"no node {body.node_id} in this run")
-            if auto_attempt is not None and node.attempt != auto_attempt:
-                raise HTTPException(409, "node lifecycle changed before automatic upload")
+            events, state, protocol, uploads = _upload_context(rd, body)
+            node = _validate_upload_metadata(rd, body, state, protocol, uploads,
+                                             auto_attempt=observed_attempt)
+            generation = body.expected_generation.lower()
             status = getattr(node.status, "value", str(node.status))
-            if status not in ("evaluated", "failed") or node.terminal_event_seq is None:
-                raise HTTPException(409, {"code": "node_not_terminal",
-                                          "message": "upload per-query arrays for a terminal node"})
             consistency = {"status": "unchecked"}
             if body.measured_check is not None:
                 check = body.measured_check
@@ -338,18 +476,6 @@ def publish_upload(srv, rd: Path, body, *, agent_token: bool, auto_attempt=None)
                     consistency = {"status": "matches_measured" if ok else "differs_from_measured",
                                    "metric": metric, "node_metric": key or "objective",
                                    "measured": measured, "uploaded_mean": value, "abs_gap": gap}
-            if body.experiment_id is not None:
-                rows, _h = read_journal(rd)
-                exp = experiments_of(rows, state.run_uid).get(body.experiment_id)
-                if exp is None:
-                    raise HTTPException(404, f"no registered experiment {body.experiment_id!r}")
-                if body.arm not in exp["arms"]:
-                    raise HTTPException(400, f"experiment {body.experiment_id!r} has no arm {body.arm!r}")
-                fixed = exp["arms"][body.arm]
-                if fixed.get("run_id") not in (None, Path(rd).name) or (
-                        fixed.get("node_id") is not None and fixed["node_id"] != body.node_id):
-                    raise HTTPException(409, {"code": "arm_bound_elsewhere",
-                                              "message": "the experiment declared this arm on another node"})
             path.parent.mkdir(parents=True, exist_ok=True)
             with interprocess_lock(Path(str(path) + ".lock"), required=True):
                 rows, health = read_manifest(rd)
@@ -367,10 +493,7 @@ def publish_upload(srv, rd: Path, body, *, agent_token: bool, auto_attempt=None)
                         if (old.get("run_uid") == state.run_uid
                                 and old.get("experiment_id") == body.experiment_id
                                 and old.get("arm") == body.arm and old.get("node_id") != body.node_id):
-                            raise HTTPException(409, {
-                                "code": "arm_bound_elsewhere",
-                                "message": (f"arm {body.arm!r} is already bound to node "
-                                            f"{old.get('node_id')}; an arm is one node")})
+                            raise _arm_owner_conflict(body, old, "accepted_upload")
                 if auto_attempt is not None:
                     for old in rows:
                         if (old.get("run_uid") == state.run_uid and old.get("node_id") == node.id
@@ -393,6 +516,7 @@ def publish_upload(srv, rd: Path, body, *, agent_token: bool, auto_attempt=None)
                        "request_sha256": request_digest, "run_uid": state.run_uid,
                        "run_id": Path(rd).name, "generation": generation,
                        "node_id": body.node_id, "node_generation": node.attempt,
+                       "expected_attempt": body.expected_attempt,
                        "node_status": status, "node_terminal_seq": node.terminal_event_seq,
                        "test_id": test_id, "test_label": body.test_label,
                        "n_queries": n, "n_clusters": len(set(clusters)),

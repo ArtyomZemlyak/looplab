@@ -3,7 +3,7 @@
 #   python -m pytest -p tests._route_recorder --route-manifest=tests/data/route_coverage.txt -o addopts="" -q <files>
 # Checked by tests/test_route_coverage.py against make_app(...).routes.
 GET /	tests/test_review_capabilities.py tests/test_server.py tests/test_static_delivery.py
-GET /api/agent-events	tests/test_agent_events.py
+GET /api/agent-events	tests/test_agent_events.py tests/test_campaign_protocol.py tests/test_research_workflow_integration.py
 DELETE /api/agent-notify	tests/test_agent_events.py
 GET /api/agent-notify	tests/test_agent_events.py
 PUT /api/agent-notify	tests/test_agent_events.py
@@ -59,9 +59,11 @@ GET /api/jobs/{job_id}	tests/test_assistant_endpoint.py tests/test_concept_lens_
 POST /api/llm/health	tests/test_provider_error_redaction.py tests/test_server.py
 GET /api/memory	tests/test_concept_shelf.py tests/test_external_run_mode.py tests/test_memory_endpoint.py tests/test_route_coverage.py tests/test_server.py
 GET /api/projects	tests/test_projects.py
-POST /api/projects	tests/test_projects.py tests/test_report.py tests/test_server.py
+POST /api/projects	tests/test_harness_handoff.py tests/test_projects.py tests/test_report.py tests/test_server.py
 DELETE /api/projects/{pid}	tests/test_projects.py
 PATCH /api/projects/{pid}	tests/test_projects.py tests/test_server.py
+GET /api/projects/{pid}/metric-profile	tests/test_harness_handoff.py
+PUT /api/projects/{pid}/metric-profile	tests/test_harness_handoff.py
 POST /api/research	tests/test_assistant_endpoint.py tests/test_provider_error_redaction.py
 GET /api/review	tests/test_review_capabilities.py
 GET /api/review/comments	tests/test_collaboration.py tests/test_review_capabilities.py
@@ -74,6 +76,9 @@ GET /api/run-mirror	tests/test_run_mirror_supervision.py
 GET /api/runs	tests/test_campaign_composite.py tests/test_campaign_protocol.py tests/test_campaign_runs.py tests/test_concept_shelf.py tests/test_node_sidecar_reads.py tests/test_owner_token.py tests/test_refusal_vocabulary.py tests/test_report.py tests/test_run_command_service.py tests/test_seq_gap_visibility.py tests/test_server.py tests/test_span_index.py tests/test_tui.py
 DELETE /api/runs/{run_id}	tests/test_deletion_identity_leak.py
 PATCH /api/runs/{run_id}	tests/test_server.py
+GET /api/runs/{run_id}/agent-event-ack	tests/test_agent_event_ack.py
+POST /api/runs/{run_id}/agent-event-ack	tests/test_agent_event_ack.py tests/test_authored_work_intents.py
+POST /api/runs/{run_id}/agent-handoff	tests/test_agent_event_ack.py tests/test_research_workflow_integration.py
 GET /api/runs/{run_id}/agent-notify	tests/test_agent_events.py
 PUT /api/runs/{run_id}/agent-notify	tests/test_agent_events.py
 GET /api/runs/{run_id}/agents_md	tests/test_server.py
@@ -93,10 +98,10 @@ POST /api/runs/{run_id}/code/sync	tests/test_code_identity.py
 GET /api/runs/{run_id}/code/worktrees	tests/test_code_identity_agent.py
 POST /api/runs/{run_id}/code/worktrees	tests/test_code_identity.py tests/test_code_identity_agent.py
 POST /api/runs/{run_id}/command	tests/test_evidence_consumer_fences.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_serve_prompt_review.py tests/test_server.py
-GET /api/runs/{run_id}/command-receipt	tests/test_campaign_composite.py tests/test_code_identity_agent.py tests/test_command_receipt.py
-POST /api/runs/{run_id}/commands	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_authored_concepts.py tests/test_campaign_composite.py tests/test_code_identity_agent.py tests/test_collaboration.py tests/test_command_receipt.py tests/test_concept_tag_command.py tests/test_external_run_mode.py tests/test_fork_from_seq.py tests/test_refusal_vocabulary.py tests/test_report_history_figures.py tests/test_run_command_service.py tests/test_server.py tests/test_stalled_finalization_affordance.py
-GET /api/runs/{run_id}/commands/{command_id}	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_campaign_composite.py tests/test_code_identity_agent.py tests/test_run_command_service.py tests/test_stalled_finalization_affordance.py
-POST /api/runs/{run_id}/commands/{command_id}/retry	tests/test_collaboration.py tests/test_run_command_service.py
+GET /api/runs/{run_id}/command-receipt	tests/test_campaign_composite.py tests/test_code_identity_agent.py tests/test_command_receipt.py tests/test_external_telemetry.py tests/test_research_workflow_integration.py
+POST /api/runs/{run_id}/commands	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_authored_concepts.py tests/test_authored_work_intents.py tests/test_campaign_composite.py tests/test_code_identity_agent.py tests/test_collaboration.py tests/test_command_receipt.py tests/test_concept_tag_command.py tests/test_cumulative_overview_guidance.py tests/test_external_run_mode.py tests/test_external_telemetry.py tests/test_fork_from_seq.py tests/test_pending_inject_cancellation.py tests/test_refusal_vocabulary.py tests/test_report_history_figures.py tests/test_research_workflow_integration.py tests/test_run_command_service.py tests/test_server.py tests/test_stalled_finalization_affordance.py
+GET /api/runs/{run_id}/commands/{command_id}	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_campaign_composite.py tests/test_code_identity_agent.py tests/test_pending_inject_cancellation.py tests/test_run_command_service.py tests/test_stalled_finalization_affordance.py
+POST /api/runs/{run_id}/commands/{command_id}/retry	tests/test_collaboration.py tests/test_pending_inject_cancellation.py tests/test_run_command_service.py
 GET /api/runs/{run_id}/comments	tests/test_collaboration.py tests/test_refusal_vocabulary.py
 GET /api/runs/{run_id}/comments/{comment_id}/history	tests/test_collaboration.py
 GET /api/runs/{run_id}/concepts	tests/test_authored_concepts.py tests/test_concept_lens_durability.py tests/test_concepts_endpoint.py tests/test_refusal_vocabulary.py
@@ -110,21 +115,23 @@ GET /api/runs/{run_id}/cost	tests/test_refusal_vocabulary.py tests/test_seq_gap_
 POST /api/runs/{run_id}/deletions	tests/test_deletion_identity_leak.py tests/test_durable_op_kit.py tests/test_finalization_stall_deletion.py tests/test_projects.py tests/test_report.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_run_deletion_memory_cascade.py tests/test_run_deletion_quarantine_residue.py tests/test_server.py tests/test_start_idempotency.py
 GET /api/runs/{run_id}/deletions/{operation_id}	tests/test_deletion_identity_leak.py
 GET /api/runs/{run_id}/events	tests/test_card_public_projection.py tests/test_collaboration.py tests/test_server.py tests/test_state_delta.py tests/test_trace_facts_and_sse_offload.py
-GET /api/runs/{run_id}/experiments/{experiment_id}/comparison	tests/test_campaign_composite.py tests/test_campaign_protocol.py
+GET /api/runs/{run_id}/experiments/{experiment_id}/comparison	tests/test_campaign_composite.py tests/test_campaign_protocol.py tests/test_research_workflow_integration.py
+GET /api/runs/{run_id}/external-telemetry	tests/test_external_telemetry.py
 GET /api/runs/{run_id}/gpu-gate	tests/test_gpu_queue.py
 PUT /api/runs/{run_id}/gpu-gate	tests/test_gpu_queue.py
 GET /api/runs/{run_id}/harness-checkpoints	tests/test_external_checkpoints.py
 POST /api/runs/{run_id}/harness-checkpoints	tests/test_external_checkpoints.py tests/test_external_progress.py tests/test_monitor_rules.py
-GET /api/runs/{run_id}/harness-contract	tests/test_external_run_mode.py
-POST /api/runs/{run_id}/harness-decisions	tests/test_external_progress.py tests/test_external_run_mode.py
-GET /api/runs/{run_id}/harness-handoff	tests/test_harness_handoff.py
+GET /api/runs/{run_id}/harness-contract	tests/test_cumulative_overview_guidance.py tests/test_external_run_mode.py tests/test_harness_handoff.py
+POST /api/runs/{run_id}/harness-decisions	tests/test_campaign_protocol.py tests/test_external_progress.py tests/test_external_run_mode.py
+GET /api/runs/{run_id}/harness-handoff	tests/test_harness_connection.py tests/test_harness_handoff.py tests/test_kimi_review_regressions.py
 GET /api/runs/{run_id}/harness-hypotheses	tests/test_external_run_mode.py
 POST /api/runs/{run_id}/harness-hypotheses	tests/test_external_run_mode.py
+GET /api/runs/{run_id}/harness-identity	tests/test_harness_connection.py tests/test_harness_handoff.py
 GET /api/runs/{run_id}/harness-monitor-rules	tests/test_monitor_rules.py
 PUT /api/runs/{run_id}/harness-monitor-rules	tests/test_monitor_rules.py
 GET /api/runs/{run_id}/harness-policy	tests/test_campaign_protocol.py
 PUT /api/runs/{run_id}/harness-policy	tests/test_campaign_protocol.py
-GET /api/runs/{run_id}/harness-progress	tests/test_campaign_composite.py tests/test_code_identity_agent.py tests/test_external_progress.py tests/test_harness_handoff.py
+GET /api/runs/{run_id}/harness-progress	tests/test_authored_work_intents.py tests/test_campaign_composite.py tests/test_code_identity_agent.py tests/test_cumulative_overview_guidance.py tests/test_external_progress.py tests/test_external_telemetry.py tests/test_harness_connection.py tests/test_harness_handoff.py
 POST /api/runs/{run_id}/harness-reviews	tests/test_external_progress.py tests/test_external_run_mode.py tests/test_external_selection.py
 GET /api/runs/{run_id}/harness-selection	tests/test_external_selection.py
 POST /api/runs/{run_id}/harness-selection/values	tests/test_external_selection.py
@@ -145,18 +152,37 @@ GET /api/runs/{run_id}/nodes/{nid}/runtime-params	tests/test_runtime_params.py
 GET /api/runs/{run_id}/nodes/{nid}/seed-files	tests/test_recorded_seed_files.py
 GET /api/runs/{run_id}/nodes/{nid}/trace	tests/test_refusal_vocabulary.py tests/test_span_index.py tests/test_trace_episode_seek.py tests/test_trace_facts_and_sse_offload.py tests/test_trace_projection_security.py tests/test_trace_projection_transport.py
 GET /api/runs/{run_id}/nodes/{node_id}/failure-forensics	tests/test_failure_forensics.py
+GET /api/runs/{run_id}/notify-scope	tests/test_notify_scope.py
+POST /api/runs/{run_id}/notify-scope/attach	tests/test_notify_scope.py
 POST /api/runs/{run_id}/novelty-preview	tests/test_external_run_mode.py
+POST /api/runs/{run_id}/operator-notes	tests/test_operator_notes.py
+GET /api/runs/{run_id}/pending-inject	tests/test_pending_inject_cancellation.py
+POST /api/runs/{run_id}/pending-inject-cancellation	tests/test_pending_inject_cancellation.py
 GET /api/runs/{run_id}/per-query	tests/test_campaign_protocol.py
-POST /api/runs/{run_id}/per-query	tests/test_campaign_composite.py tests/test_campaign_protocol.py
+POST /api/runs/{run_id}/per-query	tests/test_campaign_composite.py tests/test_campaign_protocol.py tests/test_per_query_preflight.py tests/test_research_workflow_integration.py
+POST /api/runs/{run_id}/per-query/preflight	tests/test_per_query_preflight.py
+GET /api/runs/{run_id}/profile-measurements	tests/test_kimi_review_regressions.py tests/test_profile_measurements.py
 POST /api/runs/{run_id}/project	tests/test_report.py tests/test_server.py
 GET /api/runs/{run_id}/protocol	tests/test_campaign_composite.py tests/test_campaign_protocol.py
-POST /api/runs/{run_id}/protocol/amendments	tests/test_campaign_composite.py tests/test_campaign_protocol.py
+POST /api/runs/{run_id}/protocol/amendments	tests/test_campaign_composite.py tests/test_campaign_protocol.py tests/test_per_query_preflight.py tests/test_research_workflow_integration.py
 GET /api/runs/{run_id}/prov	tests/test_fork_from_seq.py tests/test_prov_claims.py tests/test_refusal_vocabulary.py tests/test_server.py
+GET /api/runs/{run_id}/readiness-bindings	tests/test_campaign_protocol.py
+POST /api/runs/{run_id}/readiness-bindings	tests/test_campaign_protocol.py
 POST /api/runs/{run_id}/report-figures	tests/test_report_history_figures.py
 GET /api/runs/{run_id}/report-figures/{figure_id}	tests/test_report_history_figures.py
+GET /api/runs/{run_id}/report-review	tests/test_native_report_review.py
+POST /api/runs/{run_id}/report-review	tests/test_native_report_review.py
 GET /api/runs/{run_id}/report/versions	tests/test_report_history_figures.py
-GET /api/runs/{run_id}/report/versions/{seq}	tests/test_report_history_figures.py
+GET /api/runs/{run_id}/report/versions/{seq}	tests/test_cumulative_overview_guidance.py tests/test_kimi_review_regressions.py tests/test_report_history_figures.py tests/test_research_map.py
+GET /api/runs/{run_id}/report/versions/{seq}/metric-bindings	tests/test_report_bindings.py
 POST /api/runs/{run_id}/report_refresh	tests/test_evidence_consumer_fences.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_server.py
+GET /api/runs/{run_id}/research-briefing	tests/test_campaign_protocol.py tests/test_cumulative_overview_guidance.py tests/test_harness_handoff.py tests/test_kimi_review_regressions.py tests/test_research_workflow_integration.py
+GET /api/runs/{run_id}/research-export	tests/test_external_telemetry.py tests/test_kimi_review_regressions.py tests/test_research_map.py
+GET /api/runs/{run_id}/research-map	tests/test_campaign_protocol.py tests/test_kimi_review_regressions.py tests/test_report_history_figures.py tests/test_research_map.py tests/test_research_workflow_integration.py
+POST /api/runs/{run_id}/research-memo-review	tests/test_research_map.py tests/test_research_workflow_integration.py
+GET /api/runs/{run_id}/research-notices	tests/test_research_notices.py
+POST /api/runs/{run_id}/research-notices	tests/test_research_notices.py
+GET /api/runs/{run_id}/research-workflow	tests/test_harness_handoff.py
 POST /api/runs/{run_id}/reset	tests/test_durable_op_kit.py tests/test_report.py tests/test_reset_phase_locks.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_server.py
 POST /api/runs/{run_id}/resolve-activity-claims	tests/test_run_command_service.py
 GET /api/runs/{run_id}/result-notices	tests/test_result_notices.py
@@ -166,7 +192,7 @@ POST /api/runs/{run_id}/reviews	tests/test_card_public_projection.py tests/test_
 DELETE /api/runs/{run_id}/reviews/{link_id}	tests/test_review_capabilities.py
 POST /api/runs/{run_id}/skill-candidates	tests/test_external_run_mode.py
 GET /api/runs/{run_id}/spans/{sid}	tests/test_server.py tests/test_span_index.py tests/test_trace_delta.py tests/test_trace_file_security.py tests/test_trace_projection_security.py
-GET /api/runs/{run_id}/state	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_artifact_preview.py tests/test_authored_concepts.py tests/test_campaign_runs.py tests/test_card_public_projection.py tests/test_collaboration.py tests/test_concept_tag_command.py tests/test_evidence_consumer_fences.py tests/test_external_run_mode.py tests/test_external_selection.py tests/test_fork_from_seq.py tests/test_log_pages.py tests/test_memo_question_projection.py tests/test_provider_error_redaction.py tests/test_recorded_seed_files.py tests/test_refusal_vocabulary.py tests/test_report.py tests/test_report_history_figures.py tests/test_request_fold_memo.py tests/test_review_capabilities.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_runtime_params.py tests/test_seq_gap_visibility.py tests/test_server.py tests/test_server_code_freshness.py tests/test_stalled_finalization_affordance.py tests/test_state_delta.py tests/test_tui.py tests/test_upstream_api.py
+GET /api/runs/{run_id}/state	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_artifact_preview.py tests/test_authored_concepts.py tests/test_campaign_runs.py tests/test_card_public_projection.py tests/test_collaboration.py tests/test_concept_tag_command.py tests/test_evidence_consumer_fences.py tests/test_external_run_mode.py tests/test_external_selection.py tests/test_fork_from_seq.py tests/test_harness_handoff.py tests/test_log_pages.py tests/test_memo_question_projection.py tests/test_pending_inject_cancellation.py tests/test_provider_error_redaction.py tests/test_recorded_seed_files.py tests/test_refusal_vocabulary.py tests/test_report.py tests/test_report_history_figures.py tests/test_request_fold_memo.py tests/test_review_capabilities.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_runtime_params.py tests/test_seq_gap_visibility.py tests/test_server.py tests/test_server_code_freshness.py tests/test_stalled_finalization_affordance.py tests/test_state_delta.py tests/test_tui.py tests/test_upstream_api.py
 POST /api/runs/{run_id}/suggest	tests/test_collaboration.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_server.py
 POST /api/runs/{run_id}/supertask	tests/test_campaign_composite.py tests/test_campaign_protocol.py tests/test_server.py
 GET /api/runs/{run_id}/trace	tests/test_server.py tests/test_span_index.py tests/test_trace_facts_and_sse_offload.py tests/test_trace_file_security.py tests/test_trace_projection_security.py tests/test_trace_projection_transport.py
@@ -179,6 +205,7 @@ POST /api/runs/{run_id}/upstream/check	tests/test_upstream_api.py
 POST /api/runs/{run_id}/upstream/proposals	tests/test_upstream_api.py tests/test_upstream_integrity.py
 POST /api/runs/{run_id}/upstream/recover	tests/test_upstream_api.py tests/test_upstream_integrity.py tests/test_upstream_request_read.py
 GET /api/runs/{run_id}/upstream/requests/{proposal_id}	tests/test_upstream_request_read.py
+GET /api/runs/{run_id}/work-claims	tests/test_authored_work_intents.py
 GET /api/scope-report-actions/{action_id}	tests/test_report.py
 POST /api/scope-report-actions/{action_id}/abandon	tests/test_report.py
 GET /api/scope-report/{scope_type}/{scope_id:path}	tests/test_report.py

@@ -96,7 +96,36 @@ _LAYOUT = {
     "research_record": "core",  # exact-span EvidenceItem, retrieved literature, the claim join (doc 52 row 16)
     "phase_events": "core",     # inner agent phases as DIAGNOSTIC events through an engine-installed sink
     "evidence": "core",  # the ONE untrusted-evidence envelope: label + guard sentence + fence
+    "evaluator_identity": "core",
+    "retry_inputs": "core",
+    "claim_premises": "core",
+    "execution_scope": "core",
+    "external_telemetry": "core",
+    "external_work_state": "core",
+    "metric_behavior": "core",
+    "metric_profile": "core",
+    "operator_directions": "core",
+    "run_relocation": "core",
+    "work_intents": "core",
+    "source_capture": "events",
+    "cluster": "runtime",
+    "cluster_rpc": "runtime",
+    "cluster_worker": "runtime",
+    "board_context": "agents",
+    "developer_options": "agents",
+    "best_of_n_pilot": "search",
+    "policy_replay": "search",
+    "cluster_attempt": "engine",
+    "external_skill_source": "engine",
+    "operator_notes": "engine",
+    "repair_slots": "engine",
     "appstate": "serve",
+    "agent_ack": "serve",
+    "agent_handoff": "serve",
+    "agent_lifecycle_filter": "serve",
+    "pending_inject": "serve",
+    "report_review": "serve",
+    "research_notices": "serve",
     "agent_activity": "serve",  # process-local authenticated harness-read observations, not liveness
     "intake_notices": "serve",  # what the command intake did to authored text, said on the receipt
     "runtime_params": "serve",  # a node attempt's configuration documents as a flat table (doc 77)

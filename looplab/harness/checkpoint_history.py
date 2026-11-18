@@ -36,7 +36,7 @@ def checkpoint_records(rows, health):
     questions, answers = {}, {}
     invalid_records = 0
     for row in rows:
-        if (row.get("type") not in ("question", "answer")
+        if (row.get("type") not in ("question", "answer", "closure")
                 or not isinstance(row.get("checkpoint_id"), str)
                 or not row["checkpoint_id"]):
             invalid_records += 1
@@ -55,6 +55,17 @@ def checkpoint_records(rows, health):
                 invalid_records += 1
                 continue
             questions[row["checkpoint_id"]] = row
+        elif row["type"] == "closure":
+            question = questions.get(row["checkpoint_id"])
+            if (question is None or question["phase_id"] not in ("train_monitor", "asha_live")
+                    or row.get("disposition") != "ended_before_decision"
+                    or row.get("review_status") != "unreviewed"
+                    or row.get("answerer") != "engine"
+                    or not all(isinstance(row.get(key), str) for key in ("action_id", "reason"))
+                    or row["checkpoint_id"] in answers):
+                invalid_records += 1
+                continue
+            answers[row["checkpoint_id"]] = row
         else:
             if (not all(isinstance(row.get(key), str) for key in
                         ("verdict", "action_id", "reason"))
@@ -76,19 +87,32 @@ def project_checkpoints(rows, health, events, state, generation):
             node_id, attempt = event.data.get("node_id"), event.data.get("generation")
             if type(node_id) is int and type(attempt) is int:
                 claim_seqs[(node_id, attempt)] = event.seq
+    claims = {event.seq: event.data for event in events if event.type == "eval_invocation_claimed"}
+    settled = {event.data["invocation_id"]: event.data for event in events
+               if event.type == "eval_invocation_settled"
+               and isinstance(event.data.get("invocation_id"), str) and event.data["invocation_id"]}
     checkpoint_rows = []
     for q in questions.values():
         if q.get("run_generation") != generation or q.get("run_uid") != state.run_uid:
             continue
-        answer = answers.get(q["checkpoint_id"])
+        resolution = answers.get(q["checkpoint_id"])
+        closure = resolution if resolution and resolution.get("type") == "closure" else None
+        answer = resolution if resolution and resolution.get("type") == "answer" else None
         node = state.nodes.get(q.get("node_id"))
         same_attempt = (node is not None and node.attempt == q.get("node_generation")
                         and q.get("claim_seq") ==
                         claim_seqs.get((q["node_id"], q["node_generation"]), -1))
-        current = same_attempt and node.status == "pending" and answer is None
+        current = same_attempt and node.status == "pending" and resolution is None
+        claim = claims.get(q.get("claim_seq"), {})
+        invocation_id = claim.get("invocation_id")
+        invocation = settled.get(invocation_id, {}) if same_attempt and isinstance(invocation_id, str) else {}
+        matching = all(invocation.get(key) == claim.get(key) for key in ("node_id", "generation", "attempt"))
+        timing = invocation.get("execution_timing") if closure and matching else None
         checkpoint_rows.append({"question": current_question_authority(q, state) if current else q, "answer": answer,
+                                "closure": closure, "execution_timing": timing,
+                                "review_status": "unreviewed" if closure else "answered" if answer else "unresolved",
                                 "lifecycle": "same_node_attempt" if same_attempt else "superseded",
-                                "status": "answered" if answer else
+                                "status": "ended_before_decision" if closure else "answered" if answer else
                                 "pending" if same_attempt and node.status == "pending"
                                 else "superseded"})
 

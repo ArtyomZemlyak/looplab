@@ -116,11 +116,17 @@ def accepted_add_nodes(raw) -> int:
 
 
 def _on_hint(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    from looplab.core.operator_directions import apply_scoped, is_scoped, retire_all
+    if is_scoped(d):
+        st.pending_hints, st.operator_direction_ledger = apply_scoped(
+            st.pending_hints, st.operator_direction_ledger, d, e.seq)
+        return
     # Append-only by default; a `replace` hint supersedes all prior standing directives
     # (mirrors set_strategy/pending_strategy) so the boss can rewrite the single directive
     # instead of accumulating contradictory ones. Replay-safe: deterministic over the log.
     if d.get("replace"):
         st.pending_hints = [d]
+        st.operator_direction_ledger = retire_all(st.operator_direction_ledger, e.seq)
     elif not any(
         standing_hint_dedup_key(hint) == standing_hint_dedup_key(d)
         for hint in st.pending_hints

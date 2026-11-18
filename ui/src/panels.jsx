@@ -1,3 +1,4 @@
+import MetricBehavior from './MetricBehavior.jsx'
 import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import ArtifactPreview from './ArtifactPreview.jsx'
 import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -767,6 +768,7 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
           {state.drifts.map((d, i) => <tr key={i}><td className="flag">#{d.node_id}</td><td>{fmt(d.primary)}</td><td>{fmt(d.cross)}</td><td>{fmt(d.tolerance)}</td></tr>)}</tbody></table></DataTable>
         : null}
 
+      <MetricBehavior state={state} />
       <div className="section-h" ref={rewardSignalsRef}>{uiText("Reward-hacking monitor (B5) ")}{flaggedCount > 0 && <span className="chip alarm">{flaggedCount}{uiText(" currently flagged")}</span>}</div>
       <TrustState value={hackState} />
       {/* Folded state is the enforcement truth (it applies trust_gate_changed events);
@@ -2349,6 +2351,7 @@ export function MemoryPanel({ onClose }) {
       {/* WHAT THIS TAB IS. Four tabs with counts and nothing else left the operator asking what
           Cases were even for. The tiers have different writers and different readers; say so. */}
       <p className="muted memory-tier-blurb">{memoryTierBlurb(tab)}</p>
+      <p className="muted">{uiText('This panel shows shared cross-run stores, not the current run’s research memos or run-local lessons. An empty store does not mean that no research happened: inspect Research map; supported shared lessons require explicit review and publication during the run or at finalization. Nothing is copied automatically.')}</p>
       <PanelResourceNotice resource={selectedResource} label={((tab === 'knowledge' ? uiText('Knowledge notes') : uiText('Cross-run memory')))}
         onRetry={tab === 'knowledge' ? retryKnowledge : retryMemory} />
       {tab !== 'knowledge' && memory.status === 'ready' && selectedReceiptIncomplete

@@ -15,6 +15,7 @@ from typing import Literal, Optional
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import httpx
+from pydantic import StrictInt
 
 from looplab.core.errors import ConfigRefusal
 from looplab.events.eventstore import EventStoreLockError, InterprocessLockContended
@@ -544,6 +545,21 @@ class HarnessAPI:
                     "message": "Progress fields are incomplete or inconsistent. Read current state and refresh progress explicitly before deciding; missing gates are not empty obligations. No retry or work was started."}
         return result
 
+    def work_claims(self, run_id: str, expected_generation: str, peers=None, max_bytes: int = 65536) -> dict:
+        """Read caller-selected advisory declarations once; never acquire work or acknowledge on read."""
+        self._run_identity(run_id, expected_generation)
+        peers = [] if peers is None else peers
+        if (not isinstance(peers, list) or len(peers) > 8
+                or any(not isinstance(peer, str) or not peer or len(peer) > 256 for peer in peers)
+                or type(max_bytes) is not int or not 4096 <= max_bytes <= 65536):
+            raise ValueError("invalid bounded work-claims read")
+        query = urlencode({"expected_generation": expected_generation, "peer": peers, "max_bytes": max_bytes}, doseq=True)
+        result = self._checked_generation(self.request("GET", f"/api/runs/{quote(run_id, safe='')}/work-claims?{query}"), expected_generation)
+        from looplab.harness.work_claim_contract import valid_snapshot
+        if result["status"] == 200 and not result.get("code") and not valid_snapshot(result["body"], run_id, expected_generation):
+            return self._read_refusal("invalid_work_claims")
+        return result
+
     @staticmethod
     def _valid_progress(page: dict) -> bool:
         # Validate the critical compact observation, not the server's decision
@@ -586,6 +602,8 @@ class HarnessAPI:
                 and isinstance(decisions, dict) and all(isinstance(key, str) and key and count(value)
                     and value > 0 for key, value in decisions.items()) and strings(page.get("finish_reviews_due"))
                 and type(page.get("finish_report_due")) is bool):
+            return False
+        if "unreviewed_monitor_count" in page and not count(page["unreviewed_monitor_count"]):
             return False
         for field, total_key in (("finish_pending_nodes", "finish_pending_node_count"),
                                  ("pending_checkpoints", "pending_checkpoint_count")):
@@ -778,7 +796,7 @@ class HarnessAPI:
         """Explicit, read-only bootstrap check; never resumes a worker or probes a model.
 
         Successful MCP initialization alone does not test this API or credential. The
-        state read discovers the generation; handoff/progress fence subsequent reads.
+        bounded identity read discovers the generation; handoff/progress fence subsequent reads.
         An operator-supplied generation must match before reading the new incarnation.
         Errors use fixed messages rather than HTTP exception text, URLs or raw bodies.
         Success proves these reads, not agent liveness, credential scope or admission.
@@ -803,24 +821,34 @@ class HarnessAPI:
                     409: ("run_context_changed", "Run context changed or is unavailable. Read state and request fresh handoff."),
                     503: ("source_unavailable", "Run sources are unavailable. Inspect source health before acting."),
                 }.get(status, ("api_read_failed", "API read failed. Inspect the server before acting."))
+                if status == 404 and phase == "identity":
+                    code = "connection_identity_unavailable"
+                    message = "Run identity endpoint unavailable. Check the run ID and compatible server version; no broad-state fallback is used."
                 return {"ok": False, "status": status, "code": code, "at": phase, "message": message}
             if result.get("truncated") or not isinstance(result.get("body"), dict):
                 return {"ok": False, "status": status, "code": "invalid_response", "at": phase,
                         "message": "API returned incomplete connection evidence. Do not act on this check."}
             return {"ok": True, "body": result["body"]}
 
-        state = read("/state?observe_only=true", "state")
-        if state.get("ok") is False:
-            return state
-        state = state["body"]
-        generation = state.get("generation")
-        if not isinstance(generation, str) or re.fullmatch(r"[a-fA-F0-9]{64}", generation) is None:
-            return {"ok": False, "status": 200, "code": "invalid_response", "at": "state",
-                    "message": "State did not supply a valid generation. Request fresh connection context."}
+        identity = read("/harness-identity", "identity")
+        if identity.get("ok") is False:
+            return identity
+        identity = identity["body"]
+        generation = identity.get("generation")
+        uid = identity.get("run_uid")
+        if (type(identity.get("version")) is not int or identity["version"] != 1
+                or identity.get("run_id") != run_id or identity.get("mode") != "external_harness"
+                or not isinstance(uid, str) or not uid or len(uid) > 256
+                or type(identity.get("event_seq")) is not int or identity["event_seq"] < 0
+                or identity.get("source_complete") is not True
+                or not isinstance(generation, str)
+                or re.fullmatch(r"[a-fA-F0-9]{64}", generation) is None):
+            return {"ok": False, "status": 200, "code": "invalid_response", "at": "identity",
+                    "message": "Identity endpoint did not supply complete supported run identity. Request fresh connection context."}
         # Generation is a hex digest, not a case-sensitive human identifier.
         generation = generation.lower()
         if expected_generation and expected_generation.lower() != generation:
-            return {"ok": False, "status": 409, "code": "generation_mismatch", "at": "state",
+            return {"ok": False, "status": 409, "code": "generation_mismatch", "at": "identity",
                     "message": "This handoff belongs to another run generation. Request fresh context."}
         handoff = read(f"/harness-handoff?expected_generation={generation}", "handoff")
         if handoff.get("ok") is False:
@@ -829,7 +857,8 @@ class HarnessAPI:
         # A server without a harness credential is the OPEN UI (doc 82 П1): the reads above already
         # succeeded without one, so the connection is anonymous, not refused.
         paths = handoff.get("server_paths")
-        if (handoff.get("run_id") != run_id or handoff.get("generation") != generation
+        if (handoff.get("run_id") != run_id or handoff.get("run_uid") != uid
+                or handoff.get("generation") != generation
                 or handoff.get("mode") != "external_harness" or type(handoff.get("credential_configured")) is not bool
                 or not isinstance(paths, dict)
                 or any(not isinstance(paths.get(key), str) or not paths[key] for key in ("run_root", "run_dir"))
@@ -840,7 +869,8 @@ class HarnessAPI:
         if progress.get("ok") is False:
             return progress
         progress = progress["body"]
-        if progress.get("generation") != generation or not self._valid_progress(progress):
+        if (progress.get("generation") != generation or progress.get("run_uid") != uid
+                or not self._valid_progress(progress)):
             return {"ok": False, "status": 200, "code": "invalid_response", "at": "context",
                     "message": "Connection evidence does not match this external run. Request fresh context."}
         return {"ok": True, "status": 200, "code": "run_reads_succeeded", "run_id": run_id,
@@ -946,7 +976,7 @@ def build_server(api: HarnessAPI):
     def connection_check(run_id: str, expected_generation: str = "") -> dict:
         """Check UI/API access to one launched external run, beyond MCP Connected status.
 
-        Performs GET state, generation-fenced handoff and compact progress only. Pass
+        Performs GET bounded identity, generation-fenced handoff and compact progress only. Pass
         the copied handoff generation to refuse a replaced run; otherwise discover it.
         Reports fixed diagnostics for refused access, missing run, stale context or
         unavailable API. Does not resume, submit, probe a model or certify agent liveness.
@@ -957,11 +987,25 @@ def build_server(api: HarnessAPI):
         return api.connection_check(run_id, expected_generation)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
-    def research_map(run_id: str, expected_generation: str, offset: int = 0, limit: int = 20) -> dict:
-        """Read a bounded scientific map of registered questions, nodes and report history. Declarations are not permissions."""
+    def research_map(run_id: str, expected_generation: str, offset: int = 0, limit: int = 20,
+                     collections: Optional[list[str]] = None, cursors: Optional[dict[str, str]] = None,
+                     max_bytes: int = 65536, max_items: int = 40) -> dict:
+        """Read a whole-response-bounded scientific map. Use each collection's next_cursor; changed collections refuse stale continuations. Declarations are not permissions."""
         api._run_identity(run_id, expected_generation)
-        return api._checked_generation(api.request("GET", f"/api/runs/{quote(run_id, safe='')}/research-map"
-            f"?expected_generation={expected_generation}&offset={int(offset)}&limit={int(limit)}"), expected_generation)
+        query = {"expected_generation": expected_generation, "offset": offset, "limit": limit,
+                 "max_bytes": max_bytes, "max_items": max_items}
+        if collections is not None:
+            query["collections"] = collections
+        if cursors is not None:
+            query["cursors"] = json.dumps(cursors, separators=(",", ":"))
+        return api._checked_generation(api.request("GET", f"/api/runs/{quote(run_id, safe='')}/research-map?"
+            + urlencode(query, doseq=True)), expected_generation)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+    def work_claims(run_id: str, expected_generation: str, peers: Optional[list[str]] = None,
+                    max_bytes: int = 65536) -> dict:
+        """Read optional native work declarations and explicit direction ACK receipts for at most eight selected same-task peers. Subjects are author-declared, overlaps are possible only, ACK is not comprehension. Whole omitted peers are named for an explicit narrower read. This never claims work, acknowledges a direction, grants approval or gates ML."""
+        return api.work_claims(run_id, expected_generation, peers, max_bytes)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
     def review_research_memo(run_id: str, expected_generation: str, purpose: Literal["scientific", "technical"], memo: dict) -> dict:
@@ -1002,10 +1046,10 @@ def build_server(api: HarnessAPI):
             "recipient_hook": recipient_hook, "reason": reason, "next_read": next_read, "urgency": urgency})
 
     @mcp.tool()
-    def acknowledge_agent_event(run_id: str, expected_generation: str, event_id: int,
+    def acknowledge_agent_event(run_id: str, expected_generation: str, event_id: StrictInt,
                                 recipient: str, action_id: str,
                                 disposition: Literal["acknowledged", "resolved", "declined"] = "acknowledged") -> dict:
-        """Record a self-attested handoff receipt; it does not answer a checkpoint or authorize work."""
+        """Record an optional self-attested event receipt, including operator directions; not comprehension, checkpoint resolution or work authority."""
         api._run_identity(run_id, expected_generation)
         return api.request("POST", f"/api/runs/{quote(run_id, safe='')}/agent-event-ack", {
             "expected_generation": expected_generation, "event_id": event_id,
@@ -1314,8 +1358,8 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
                          metrics: dict, action_id: str, test_label: str | None = None,
                          experiment_id: str | None = None, arm: str | None = None,
                          query_key: str = "keys", cluster_key: str | None = "users",
-                         measured_check: dict | None = None) -> dict:
-        """Send a TERMINAL node's per-query arrays (local .npz or .json, <=24 MB) so LoopLab can
+                         measured_check: dict | None = None, dry_run: bool = False) -> dict:
+        """Metadata is checked before file read; dry_run checks only metadata. Send a TERMINAL node's per-query arrays (local .npz or .json, <=24 MB) so LoopLab can
         compare models itself. The request is spooled client-side until answered; an empty path
         resends the spooled body for this action_id. metrics: {name: {kind: mean, array, columns?} | {kind: ratio, num,
         den, columns?}}; columns selects 2-D columns before the row sum. LoopLab derives the shared
@@ -1325,7 +1369,7 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
         return composite.upload_per_query(
             api, run_id, expected_generation, node_id=node_id, path=path, metrics=metrics,
             action_id=action_id, test_label=test_label, experiment_id=experiment_id, arm=arm,
-            query_key=query_key, cluster_key=cluster_key, measured_check=measured_check)
+            query_key=query_key, cluster_key=cluster_key, measured_check=measured_check, dry_run=dry_run)
 
     @mcp.tool()
     def resume_per_query_upload(run_id: str, action_id: str) -> dict:
@@ -1400,7 +1444,8 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
                           code_from: dict | None = None, parent_ids: list[int] | None = None,
                           parent_generations: dict | None = None,
                           node_kind: str | None = None, uses: list[int] | None = None,
-                          pre_stages: list[dict] | None = None, job_role: str | None = None) -> dict:
+                          pre_stages: list[dict] | None = None, job_role: str | None = None,
+                          expected_evaluator_digest: str | None = None) -> dict:
         """One call for the whole admission ceremony: pre-register `experiment` (protocol
         journal), add `research_question` {id, statement?, concepts?} and file the idea under it,
         publish `memo`, record `decisions` {phase: {reason, alternatives?}} the run requires,
@@ -1423,7 +1468,8 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
             experiment=experiment, experiment_reason=experiment_reason, memo=memo,
             decisions=decisions, dry_run=dry_run, code_from=code_from, parent_ids=parent_ids,
             parent_generations=parent_generations, node_kind=node_kind, uses=uses,
-            pre_stages=pre_stages, job_role=job_role)
+            pre_stages=pre_stages, job_role=job_role,
+            expected_evaluator_digest=expected_evaluator_digest)
 
     def _code_path(run_id: str, expected_generation: str, suffix: str) -> str:
         api._run_identity(run_id, expected_generation)
@@ -1499,13 +1545,17 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
 
     @mcp.tool()
     def retry_node(run_id: str, expected_generation: str, node_id: int, key: str,
-                   from_stage: str = "eval", generation: int | None = None) -> dict:
+                   from_stage: str = "eval", generation: int | None = None,
+                   resume_inputs: list[dict] | None = None) -> dict:
         """Retry a failed node's setup/launch as a NEW ATTEMPT of the same node (node_reset from
         eval or a later stage) — not a new node, not a new run. Earlier attempts keep their
-        terminal rows; their stage logs are archived under attempt_logs/. If the fix needs a protected
+        terminal rows; their stage logs are archived under attempt_logs/. Declare optional
+        resume_inputs=[{path, kind?, sha256?, source_attempt?, receipt_path?}] to verify external
+        durable dependencies before rematerializing workdir. If the fix needs a protected
         file or input, amend_protocol (kind=files/task) first, with the engine paused."""
         return composite.retry_node(api, run_id, expected_generation, node_id=node_id, key=key,
-                                    from_stage=from_stage, generation=generation)
+                                    from_stage=from_stage, generation=generation,
+                                    resume_inputs=resume_inputs)
 
 
 def stdio_credential(token: str | None = None) -> str:

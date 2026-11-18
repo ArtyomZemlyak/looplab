@@ -771,6 +771,8 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # and therefore INHERITS an accountant attached before it — and mints a second one for a copy
     # taken first. `core/llm.py::run_cost_accountant` records the 2x ceiling that ordering luck
     # produced on the wrap-up-only path; attaching at the entry point makes the order irrelevant.
+    from looplab.engine.cluster_attempt import preflight as cluster_preflight
+    cluster_preflight(task, settings)
     run_cost_accountant(settings)
     # Everything this entry point may lose to a missing model, in the order the two gates run. A
     # wrap-up entry collects instead of raising (see below) and the commands close by naming it.
@@ -994,7 +996,8 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # belong to the SUBPROCESS tier and have no container to describe.
         sandbox=make_sandbox(settings.trust_mode, **docker_tier_kwargs(settings),
                              mem_local=settings.sandbox_memory_local,
-                             fsize_local=settings.sandbox_fsize_local),
+                             fsize_local=settings.sandbox_fsize_local,
+                             cluster_executor=settings.cluster_executor),
         # The ONE builder of a policy's run-level knobs, shared with every Strategist rebuild
         # (`engine/strategy.py::_apply_strategy`), which used to spell a shorter list of its own and
         # dropped the rest on a switch (review 2026-09-22, SCJ-01). `asha_*` reach ASHA only
@@ -1290,5 +1293,5 @@ apply_help_panels(app)
 from looplab.cli.run_cmds import approve, finalize, init, resume, run, stop  # noqa: E402,F401
 from looplab.cli.export_cmds import (bench, export_mlflow, export_notebook,  # noqa: E402,F401
                                      harden, smoke)
-from looplab.cli.inspect_cmds import inspect, replay, tensorboard, timings  # noqa: E402,F401
+from looplab.cli.inspect_cmds import inspect, policy_replay, replay, tensorboard, timings  # noqa: E402,F401
 from looplab.cli.ui_cmds import build_ui, tui, ui  # noqa: E402,F401

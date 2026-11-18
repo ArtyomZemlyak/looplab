@@ -16,11 +16,15 @@ from __future__ import annotations
 DEEP_RESEARCH_HINT_PREFIX = "deep-research directions: "
 
 
-def operator_directive_texts(pending_hints) -> list[str]:
-    """The standing OPERATOR directives, oldest first — deep-research rows never carry operator
-    authority, whether stamped `source="deep_research"` or only recognisable by their prefix."""
-    rows = [h for h in (pending_hints or [])
+def operator_directive_rows(pending_hints) -> list[dict]:
+    """Current operator rows, in native order, shared by text and source-reference readers."""
+    return [h for h in (pending_hints or [])
             if isinstance(h, dict) and h.get("source") != "deep_research"
-            and not str(h.get("text") or "").lstrip().startswith(DEEP_RESEARCH_HINT_PREFIX)]
-    hints = [str(h.get("text", "")).strip() for h in rows if h.get("text")]
-    return [h for h in hints if h]
+            and not str(h.get("text") or "").lstrip().startswith(DEEP_RESEARCH_HINT_PREFIX)
+            and h.get("status", "active") == "active"
+            and str(h.get("text") or "").strip()]
+
+
+def operator_directive_texts(pending_hints) -> list[str]:
+    """The standing OPERATOR directives, oldest first — never model-written advisories."""
+    return [str(h["text"]).strip() for h in operator_directive_rows(pending_hints)]

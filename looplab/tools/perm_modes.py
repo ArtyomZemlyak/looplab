@@ -137,6 +137,10 @@ _ACTION_RISK = {
     ("run_control", "delete_node"): RISK_HIGH,
     ("run_control", "delete_run"): RISK_HIGH,
     ("run_control", "set_trust_gate"): RISK_HIGH,
+    # The optional reviewer is advisory. Even Auto must show the separate nomination card;
+    # accepting it records research consideration only, with no experiment or execution grant.
+    ("run_control", "nominate_report_review"): RISK_HIGH,
+    ("run_control", "read_report_review"): RISK_READ,
     ("run_control", "upstream_propose"): RISK_HIGH,
     ("run_control", "upstream_check"): RISK_HIGH,
     ("run_control", "upstream_advance"): RISK_HIGH,
@@ -178,6 +182,8 @@ _ACTION_CONSEQUENCE = {
     ("run_control", "set_directive"): "Writes or replaces the reviewed directive on the scoped run.",
     ("run_control", "inject_experiment"): "Adds one reviewed node to the scoped run; its build and evaluation spend budget.",
     ("run_control", "evaluate_track"): "Queues one declared evaluation track over the scoped run's nodes; it spends GPU time and adds measured-after-the-run metrics.",
+    ("run_control", "nominate_report_review"): "Records only the reviewed research nomination as a retractable direction; does not grant, schedule or launch experimental work.",
+    ("run_control", "read_report_review"): "Reads the original advisory report-review receipt and its native evidence status.",
     ("run_control", "delete_node"): "Permanently removes the reviewed node subtree from the run.",
     ("run_control", "delete_run"): "Permanently deletes the scoped run directory.",
     ("run_control", "set_trust_gate"): "Changes the scoped run's trust-enforcement policy.",

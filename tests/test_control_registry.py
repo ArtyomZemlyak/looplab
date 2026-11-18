@@ -42,7 +42,7 @@ from looplab.events.types import (  # noqa: E402
 from looplab.serve import control_validation, protocol  # noqa: E402
 from looplab.serve.control_validation import (  # noqa: E402
     CONTROL_DATA_FIELDS, CONTROL_SPECS, normalize_control)
-from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS  # noqa: E402
+from looplab.serve.protocol import COLLABORATION_EVENTS, SEMANTIC_CAS_EVENTS, CONTROL_EVENTS  # noqa: E402
 from looplab.serve.run_commands import RunCommandService  # noqa: E402
 
 FAKE = "fake_control"
@@ -202,9 +202,9 @@ def test_a_new_control_event_cannot_ship_with_a_missing_handler(monkeypatch):
     assert spec.normalize is None and spec.precondition is None and spec.decide is None
 
 
-def test_a_precondition_for_a_non_collaboration_event_is_refused(monkeypatch):
+def test_a_precondition_outside_semantic_cas_events_is_refused(monkeypatch):
     """The cross-check, which is what makes the `None`s in the precondition table honest: only a
-    COLLABORATION event may declare an append-time recheck, because only those reach the strict-lock
+    SEMANTIC_CAS event may declare an append-time recheck, because only those reach the strict-lock
     append path that runs one."""
     import looplab.serve.protocol as protocol
 
@@ -216,19 +216,19 @@ def test_a_precondition_for_a_non_collaboration_event_is_refused(monkeypatch):
         source = _add_entry(source, declaration, entry)
     with pytest.raises(AssertionError) as failure:
         _exec_source(source)
-    assert "collaboration events take the append-time recheck path" in str(failure.value)
+    assert "semantic-CAS events take the append-time recheck path" in str(failure.value)
 
 
-def test_only_collaboration_events_carry_a_precondition_and_the_rest_fail_closed(tmp_path):
+def test_exactly_semantic_cas_events_carry_a_precondition_and_the_rest_fail_closed(tmp_path):
     """The old chain's final `else` was the COMMENT recheck, so an event type it did not name was
     silently rechecked against a comment id it does not have — and, for a payload that happened to
     look like a comment revision, PASSED. A missing handler is now a refusal."""
     declared = {event for event, handler in control_validation._CONTROL_PRECONDITIONS.items()
                 if handler is not None}
-    assert declared == set(COLLABORATION_EVENTS)
+    assert declared == set(SEMANTIC_CAS_EVENTS)
 
     state = _Srv(tmp_path).state(_seed(tmp_path))
-    for event_type in sorted(set(CONTROL_EVENTS) - set(COLLABORATION_EVENTS)) + ["not_an_event"]:
+    for event_type in sorted(set(CONTROL_EVENTS) - set(SEMANTIC_CAS_EVENTS)) + ["not_an_event"]:
         error = RunCommandService._collaboration_precondition(state, event_type, {})
         assert error is not None and error["code"] == "collaboration_precondition_missing", (
             f"{event_type} must not borrow another event's append-time recheck")

@@ -530,6 +530,10 @@ class ResourceSchedulingMixin:
         if not hasattr(self, "_eval_time_reservations"):
             # The eval-SECOND half of the same lifecycle reservation (see the module docstring).
             self._eval_time_reservations = {}
+        if not hasattr(self, "_eval_repair_yielded"):
+            self._eval_repair_yielded = set()
+        if not hasattr(self, "_eval_unsettled_charges"):
+            self._eval_unsettled_charges = {}
 
     def _memory_envelope(self, gpu_count: int) -> Optional[int]:
         """Largest per-GPU request for which ``gpu_count`` devices can fit."""
@@ -1097,6 +1101,31 @@ class ResourceSchedulingMixin:
         self._ensure_resource_state()
         with self._gpu_condition:
             self._eval_time_reservations.pop((int(node_id), generation), None)
+            self._eval_unsettled_charges.pop((int(node_id), generation), None)
+            self._eval_repair_yielded.discard((int(node_id), generation))
+            self._gpu_epoch += 1
+            self._gpu_condition.notify_all()
+
+    def _yield_eval_lane(self, node_id: int, generation: int, actual_seconds: float) -> bool:
+        """Park physical occupancy and future allowance; retain all real unpublished chain spend."""
+        self._ensure_resource_state()
+        key = (int(node_id), generation)
+        with self._gpu_condition:
+            if key not in self._eval_time_reservations and key not in self._eval_repair_yielded:
+                return False  # direct phase probes/unadmitted lifecycle own no dispatch slot
+            self._eval_time_reservations.pop(key, None)
+            self._eval_unsettled_charges[key] = max(0.0, float(actual_seconds))
+            self._eval_repair_yielded.add(key)
+            self._gpu_epoch += 1
+            self._gpu_condition.notify_all()
+        from looplab.engine.speculation import notify_producer
+        notify_producer(getattr(self, "_eval_notify", None), ("repair_yield", key))
+        return True
+
+    def _unsettled_eval_seconds(self) -> float:
+        self._ensure_resource_state()
+        with self._gpu_condition:
+            return float(sum(self._eval_unsettled_charges.values()))
 
     def _reserved_eval_seconds(self) -> float:
         """Worst-case eval seconds every IN-FLIGHT lane may still charge."""

@@ -20,7 +20,7 @@ from typing import Literal, Optional, Union
 
 import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from looplab.serve.principal import request_agent_token
 
@@ -66,7 +66,7 @@ class AgentHandoffBody(BaseModel):
 class AgentAckBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_generation: str = Field(pattern=r"^[0-9a-f]{64}$")
-    event_id: int = Field(ge=0)
+    event_id: StrictInt = Field(ge=0)
     recipient: str = Field(pattern=r"^[A-Za-z0-9_.-]{1,64}$")
     action_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
     disposition: Literal["acknowledged", "resolved", "declined"]

@@ -92,7 +92,7 @@ from __future__ import annotations
 from typing import Optional
 
 ENDGAME_KINDS = ("merge", "sweep")
-PLAN_REASONS = ("initial", "budget_changed", "stagnation", "reopened", "injected")
+PLAN_REASONS = ("initial", "budget_changed", "stagnation", "reopened", "injected", "population_changed")
 # WHY a bounded stall episode closed — the `reopen_cause` of a `reopened` row. `stall_retracted` is
 # the migration's own: a legacy (unbounded) stall row whose stall does not hold under the corrected
 # `agents/strategist.py::stall_rung` (the attempts on the champion, not every id after it).
@@ -103,7 +103,8 @@ HARD_STALL_RUNGS = 2
 
 def build_plan(*, max_nodes: int, n_seeds: int, reserve_frac: float, at_node: int,
                reason: str = "initial", endgame_sweep: bool = True,
-               endgame_start: Optional[int] = None, injected: int = 0) -> Optional[dict]:
+               endgame_start: Optional[int] = None, injected: int = 0,
+               node_count_basis: str = "all_nodes") -> Optional[dict]:
     """The plan row, or None when no reserve is configured (a 0 fraction, or a budget too small to
     hold a seed phase AND at least one reserved slot).
 
@@ -118,7 +119,7 @@ def build_plan(*, max_nodes: int, n_seeds: int, reserve_frac: float, at_node: in
         injected = max(0, int(injected or 0))
     except (TypeError, ValueError):
         return None
-    if max_nodes <= 0 or frac <= 0.0:
+    if max_nodes <= 0 or frac <= 0.0 or node_count_basis not in ("all_nodes", "card_budget"):
         return None
     reserve = max(1, round(max(0, max_nodes - injected) * min(frac, 0.9)))
     if endgame_start is None:
@@ -144,7 +145,32 @@ def build_plan(*, max_nodes: int, n_seeds: int, reserve_frac: float, at_node: in
     }
     if injected:
         row["injected"] = injected
+    if node_count_basis == "card_budget":
+        row["node_count_basis"] = node_count_basis
     return row
+
+
+def plan_population(state, plan=None, *, basis=None):
+    """The exact node universe whose budget the plan is cut over; legacy rows keep all nodes."""
+    basis = basis or (plan or {}).get("node_count_basis", "all_nodes")
+    if basis == "all_nodes":
+        return state.nodes
+    if basis != "card_budget":
+        raise ValueError("unsupported plan node count basis")
+    from looplab.core.models import node_counts_toward_card_budget
+    return {nid: node for nid, node in state.nodes.items()
+            if node_counts_toward_card_budget(state, node)}
+
+
+def plan_node_count(state, plan=None):
+    return len(plan_population(state, plan if plan is not None else getattr(state, "plan", None)))
+
+
+def _plan_positions(state, plan):
+    nodes = plan_population(state, plan)
+    if (plan or {}).get("node_count_basis") == "card_budget":
+        return {nid: rank for rank, nid in enumerate(sorted(nodes))}
+    return {nid: nid for nid in nodes}
 
 
 def operator_injected(events, nodes) -> int:
@@ -247,12 +273,15 @@ def plateau_nodes(state, *, floor: int = 0) -> tuple[Optional[int], int]:
     leader = plateau_leader(state)
     if leader is None:
         return None, 0
-    low = max(start, leader + 1, int(floor or 0))
+    low = max(leader + 1, int(floor or 0))
+    positions = _plan_positions(state, plan)
     aborted = set(getattr(state, "aborted_nodes", None) or [])
     silent = _plateau_silent_reasons()
     count = 0
     for node in (getattr(state, "nodes", None) or {}).values():
-        if node.id < low or (end is not None and node.id >= end):
+        position = positions.get(node.id)
+        if (node.id < low or position is None or position < start
+                or (end is not None and position >= end)):
             continue
         if node.status is NodeStatus.pending or node.tombstoned or node.id in aborted:
             continue
@@ -483,7 +512,8 @@ def _reopened(plan: dict, cut: dict, spent: list[int], cause: str) -> Optional[d
 
 def replan(plan: Optional[dict], *, max_nodes: int, n_seeds: int, reserve_frac: float,
            at_node: int, stall_rung: int, endgame_sweep: bool = True, stall_nodes: int = 0,
-           champion: Optional[int] = None, injected: int = 0) -> Optional[dict]:
+           champion: Optional[int] = None, injected: int = 0,
+           node_count_basis: Optional[str] = None) -> Optional[dict]:
     """A re-cut plan when one is due, else None.
 
     `stall_nodes` 0 (the bare-library and legacy-snapshot value) is the historical rule byte for
@@ -525,9 +555,20 @@ def replan(plan: Optional[dict], *, max_nodes: int, n_seeds: int, reserve_frac: 
         injected = max(0, int(injected or 0))
     except (TypeError, ValueError):
         injected = 0
+    basis = node_count_basis or plan.get("node_count_basis", "all_nodes")
+    if basis not in ("all_nodes", "card_budget"):
+        return None
     cut = {"max_nodes": max_nodes, "n_seeds": n_seeds, "reserve_frac": reserve_frac,
-           "at_node": at_node, "endgame_sweep": endgame_sweep, "injected": injected}
+           "at_node": at_node, "endgame_sweep": endgame_sweep, "injected": injected,
+           "node_count_basis": basis}
     spent = _stall_champions(plan)
+    if plan.get("node_count_basis", "all_nodes") != basis:
+        # Old coordinates cannot be interpreted as the new population. Re-cut explicitly; retain
+        # spent champions so a migration cannot buy their stall experiments a second time.
+        holder = _int_or_none(plan.get("champion"))
+        if holder is not None and holder not in spent:
+            spent.append(holder)
+        return _with_spent(build_plan(**cut, reason="population_changed"), spent)
     own = _own_fraction(plan, cut)         # every episode row keeps the row's fraction (crit_v62 F3)
     episode = _episode(plan)
     if episode is not None:
@@ -552,11 +593,11 @@ def replan(plan: Optional[dict], *, max_nodes: int, n_seeds: int, reserve_frac: 
         if int(max_nodes) != planned_budget:
             return build_plan(max_nodes=max_nodes, n_seeds=n_seeds, reserve_frac=reserve_frac,
                               at_node=at_node, reason="budget_changed", endgame_sweep=endgame_sweep,
-                              injected=injected)
+                              injected=injected, node_count_basis=basis)
         if stall_rung >= HARD_STALL_RUNGS and at_node < planned_start and at_node > n_seeds:
             return build_plan(max_nodes=max_nodes, n_seeds=n_seeds, reserve_frac=reserve_frac,
                               at_node=at_node, reason="stagnation", endgame_sweep=endgame_sweep,
-                              endgame_start=at_node, injected=injected)
+                              endgame_start=at_node, injected=injected, node_count_basis=basis)
         return _injected_recut(plan, cut, planned_start, [])
     if plan.get("reason") == "stagnation":
         # THE MIGRATION: an unbounded stall row this setting did not write (inf13's, at node 12).
@@ -623,6 +664,7 @@ class _EndgameView:
         from looplab.search.policy import rank_by_metric
         self.state = state
         self.plan = plan
+        self.positions = _plan_positions(state, plan)
         self.best = state.best()
         self.best_id = self.best.id if self.best is not None else None
         self.breedable = rank_by_metric(state, state.breedable_nodes())
@@ -739,7 +781,7 @@ class _EndgameView:
         own = self.own(sweep=False)
         ensemble_owed = own is not None and own.get("kind") == "merge"
         cut_in_reserve = self.best is not None and any(
-            n.id >= start and isinstance(n.simplified, dict)
+            self.positions.get(n.id, -1) >= start and isinstance(n.simplified, dict)
             and n.simplified.get("parent_id") == self.best.id for n in self.state.nodes.values())
         return not ensemble_owed and not cut_in_reserve
 
@@ -765,7 +807,7 @@ class _EndgameView:
         from looplab.search.policy import KIND_IMPROVE, KIND_MERGE, META_CHOSEN, META_REASON
         action: Optional[dict] = None
         start = int(self.plan["endgame_start"])
-        merged_in_reserve = any(n.operator == "merge" and n.id >= start
+        merged_in_reserve = any(n.operator == "merge" and self.positions.get(n.id, -1) >= start
                                 for n in self.state.nodes.values())
         kinds = self.kinds
         pick = (self.merge_pick() if "merge" in kinds and not merged_in_reserve else None)
@@ -832,7 +874,7 @@ def endgame_admits(state, plan: Optional[dict], action: dict, *, sweep: bool = T
     — which is why a raw lane that re-derives the POLICY's action must ask before it pays. When the
     reserve has nothing of its own (no champion, no admissible merge) every action passes, as the
     gate passes the turn through."""
-    if not isinstance(action, dict) or not in_endgame(plan, len(state.nodes)):
+    if not isinstance(action, dict) or not in_endgame(plan, plan_node_count(state, plan)):
         return True
     return _EndgameView(state, plan).admits(action, sweep=sweep)
 
@@ -843,7 +885,7 @@ def endgame_admitted(state, actions: list[dict], *, sweep: bool = True) -> list[
     non-champion, proposed, paid for, then displaced by the gate's own merge). Outside the reserve
     the lane is returned whole, so every raw lane is byte-identical there."""
     plan = getattr(state, "plan", None)
-    if not in_endgame(plan, len(state.nodes)):
+    if not in_endgame(plan, plan_node_count(state, plan)):
         return list(actions)
     view = _EndgameView(state, plan)
     return [action for action in actions
@@ -856,7 +898,7 @@ def endgame_own_action(state, *, sweep: bool = True) -> Optional[dict]:
     own to spend. What `endgame_actions` hands a turn it displaces, asked by a lane that must REPLACE
     a turn's action without leaving the reserve (`artifact_fence.py::refuse_unrunnable_builds`)."""
     plan = getattr(state, "plan", None)
-    if not in_endgame(plan, len(state.nodes)):
+    if not in_endgame(plan, plan_node_count(state, plan)):
         return None
     own = _EndgameView(state, plan).own(sweep=sweep)
     return dict(own) if own is not None else None
@@ -868,7 +910,7 @@ def endgame_refused_card_ids(state, plan: Optional[dict]) -> frozenset[str]:
     still owns its work can be elected or claimed, so a terminal, dropped or merged-away one is never
     named. Empty outside the reserve, so every lane is byte-identical there. The `sweep` switch
     cannot move a Card's answer (it only shapes the reserve's own raw action), so none is asked."""
-    if not in_endgame(plan, len(state.nodes)):
+    if not in_endgame(plan, plan_node_count(state, plan)):
         return frozenset()
     from looplab.search.card_selection import card_action
     view = _EndgameView(state, plan)
@@ -887,7 +929,7 @@ def endgame_actions(state, plan: Optional[dict], actions: list[dict], *,
                     sweep: bool = True) -> list[dict]:
     """The dispatcher's rule inside the reserve (see the module docstring). Outside the reserve, or
     when the turn's actions are evaluations / the finish, the actions are returned untouched."""
-    if not in_endgame(plan, len(state.nodes)) or not actions:
+    if not in_endgame(plan, plan_node_count(state, plan)) or not actions:
         return actions
     if any(a.get("kind") == "evaluate" for a in actions):
         return actions
