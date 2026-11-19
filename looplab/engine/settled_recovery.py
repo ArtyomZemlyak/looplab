@@ -97,12 +97,24 @@ def settled_result_record(res, *, stdout_tail: str, stderr_tail: str) -> dict:
     return rec
 
 
-def result_from_record(rec) -> tuple[Optional[RunResult], str]:
+def result_from_record(rec, *, artifact: bool = False) -> tuple[Optional[RunResult], str]:
     """The `RunResult` a settle row's `result` stands for, or `(None, reason)`."""
     if not isinstance(rec, dict):
         return None, "settle_row_has_no_result"
     if rec.get("v") != SETTLED_RESULT_VERSION:
         return None, f"settle_result_version_unknown:{rec.get('v')!r}"
+    if artifact:
+        from looplab.engine.eval_attempt_rules import attempt_succeeded
+        kwargs = {name: rec.get(name) for name in _RESULT_FIELDS
+                  if name not in ("metric", "exit_code", "timed_out", "stalled")}
+        res = RunResult(exit_code=int(rec.get("exit_code") or 0),
+                        stdout=str(rec.get("stdout_tail") or ""),
+                        stderr=str(rec.get("stderr_tail") or ""),
+                        metric=None, timed_out=bool(rec.get("timed_out")),
+                        stalled=bool(rec.get("stalled")), **kwargs)
+        if not attempt_succeeded(res, artifact=True):
+            return None, "settle_artifact_not_clean"
+        return res, ""
     metric = rec.get("metric")
     if not isinstance(metric, (int, float)) or isinstance(metric, bool):
         return None, "settle_result_has_no_metric"
@@ -132,20 +144,22 @@ def _reader_kinds(spec) -> set:
 
 
 def result_from_workdir_log(workdir, eval_spec, *, since: float, pipeline_stages,
-                            enforce_drift: bool) -> tuple[Optional[RunResult], str]:
+                            enforce_drift: bool,
+                            artifact: bool = False) -> tuple[Optional[RunResult], str]:
     """Rule 2: re-read the invocation's captured output from the node workdir under the CURRENT
     spec, or `(None, reason)`. Pure reads only; never raises."""
     from looplab.runtime import command_eval
 
-    if not isinstance(eval_spec, dict) or not isinstance(eval_spec.get("metric"), dict):
+    if not isinstance(eval_spec, dict) or (not artifact and not isinstance(eval_spec.get("metric"), dict)):
         return None, "no_command_eval_spec"
     if pipeline_stages:
         # A staged pipeline's metric is read off the LAST stage's output, and which stage that was
         # (the engine may append a `score` stage) is not recoverable from the workdir alone.
         return None, "staged_pipeline_output_not_recoverable"
-    if isinstance(eval_spec.get("host_scorer"), dict):
+    if not artifact and isinstance(eval_spec.get("host_scorer"), dict):
         return None, "host_scorer_not_recoverable"
-    readers = {k: eval_spec.get(k) for k in ("metric", "metrics", "constraints", "cross_check")}
+    reader_keys = ("metrics", "constraints") if artifact else ("metric", "metrics", "constraints", "cross_check")
+    readers = {k: eval_spec.get(k) for k in reader_keys}
     unsafe = _reader_kinds(readers) - _PURE_READER_KINDS
     if unsafe:
         return None, "reader_executes_code:" + ",".join(sorted(unsafe))
@@ -161,18 +175,34 @@ def result_from_workdir_log(workdir, eval_spec, *, since: float, pipeline_stages
         return None, "workdir_log_unreadable"
     out = raw.decode("utf-8", errors="replace")
     cwd = os.path.join(str(workdir), str(eval_spec.get("cwd") or "."))
-    metric_spec = eval_spec["metric"]
     try:
-        m = command_eval.read_metric(out, cwd, metric_spec, since=since)
-        if m is None:
-            return None, "metric_not_in_workdir_log"
-        fields = command_eval.captured_result_fields(
-            out, cwd, metric_spec, m, metrics=eval_spec.get("metrics") or None,
-            constraints=eval_spec.get("constraints") or None,
-            cross_check=eval_spec.get("cross_check"), enforce_drift=enforce_drift,
-            drift_tolerance=float(eval_spec.get("drift_tolerance", 1e-6)), since=since)
+        if artifact:
+            fields = command_eval.captured_result_fields(
+                out, cwd, {"kind": "stdout_json", "key": "__artifact__"}, None,
+                metrics=eval_spec.get("metrics") or None,
+                constraints=eval_spec.get("constraints") or None,
+                cross_check=None, enforce_drift=False,
+                drift_tolerance=float(eval_spec.get("drift_tolerance", 1e-6)), since=since)
+            fields["metric"] = None
+        else:
+            metric_spec = eval_spec["metric"]
+            m = command_eval.read_metric(out, cwd, metric_spec, since=since)
+            if m is None:
+                return None, "metric_not_in_workdir_log"
+            fields = command_eval.captured_result_fields(
+                out, cwd, metric_spec, m, metrics=eval_spec.get("metrics") or None,
+                constraints=eval_spec.get("constraints") or None,
+                cross_check=eval_spec.get("cross_check"), enforce_drift=enforce_drift,
+                drift_tolerance=float(eval_spec.get("drift_tolerance", 1e-6)), since=since)
     except Exception as exc:  # noqa: BLE001 — a reader fault means "no evidence", and the node re-runs as before
         return None, f"workdir_log_read_failed:{type(exc).__name__}"
+    if artifact:
+        from looplab.engine.eval_attempt_rules import attempt_succeeded
+        res = RunResult(exit_code=0, stdout=out, stderr="", timed_out=False,
+                        declared_reason=command_eval.declared_failure_reason(out), **fields)
+        if not attempt_succeeded(res, artifact=True):
+            return None, "artifact_workdir_log_failed"
+        return res, ""
     if fields.get("metric") is None:
         return None, "metric_withheld_by_drift_check"
     return RunResult(exit_code=0, stdout=out, stderr="", timed_out=False, **fields), ""

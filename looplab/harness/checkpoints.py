@@ -148,6 +148,24 @@ def rule_previous_progress(rows: list[dict], question: dict) -> Optional[float]:
     return previous
 
 
+def rule_previous_progress_by_rule(rows: list[dict], question: dict) -> dict[str, float]:
+    """Per-`rule_id` last recorded `progress` for `question`'s lifecycle (used by `any_of` rules)."""
+    by_rule: dict[str, float] = {}
+    questions = {r["checkpoint_id"]: r for r in rows if r.get("type") == "question"}
+    for r in rows:
+        if r.get("type") != "answer" or not isinstance(r.get("rule_facts"), dict):
+            continue
+        q = questions.get(r.get("checkpoint_id"))
+        rid = r.get("rule_id")
+        if (q is not None and isinstance(rid, str) and rid
+                and q.get("node_id") == question.get("node_id")
+                and q.get("node_generation") == question.get("node_generation")
+                and q.get("phase_id") == question.get("phase_id")
+                and isinstance(r["rule_facts"].get("progress"), (int, float))):
+            by_rule[rid] = r["rule_facts"]["progress"]
+    return by_rule
+
+
 def _answer_by_rule(rd: Path, path: Path, question: dict, rows: list[dict]) -> None:
     from looplab.harness.monitor_rules import evaluate, read_rules
 
@@ -155,8 +173,10 @@ def _answer_by_rule(rd: Path, path: Path, question: dict, rows: list[dict]) -> N
     if not rules:
         return
     previous = rule_previous_progress(rows, question)
+    previous_by_rule = rule_previous_progress_by_rule(rows, question)
     try:
-        verdict = evaluate(rules, question, previous_progress=previous)
+        verdict = evaluate(rules, question, previous_progress=previous,
+                           previous_by_rule=previous_by_rule)
     except Exception:  # noqa: BLE001 — a rule that cannot be evaluated leaves the question to the agent
         return
     if verdict is None:

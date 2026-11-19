@@ -169,10 +169,27 @@ def _setup_campaign_app(tmp_path, monkeypatch):
     store = EventStore(rd / "events.jsonl")
     store.append("run_started", {"run_id": "demo", "run_uid": "uid-demo",
                                  "task_id": "demo", "goal": "g", "direction": "max"})
+    monkeypatch.setattr("looplab.serve.engine_proc.auto_resume_enabled", lambda: False)
     app = make_app(root)
     client = TestClient(app)
     monkeypatch.setattr(client.app.state.looplab.commands, "engine_liveness", lambda _rd: False)
     return rd, store, client
+
+
+@pytest.fixture(autouse=True)
+def _reap_test_spawned_engines():
+    from looplab.serve import engine_proc
+    before = set(engine_proc._spawned_engines)
+    yield
+    for pid in list(set(engine_proc._spawned_engines) - before):
+        proc = engine_proc._spawned_engines.pop(pid, None)
+        engine_proc._kill_process_tree(pid)
+        if proc is not None and callable(getattr(proc, "wait", None)):
+            import subprocess
+            try:
+                proc.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
 
 
 def test_budget_protocol_amendment_accepts_eval_timeout_and_max_eval_seconds(tmp_path, monkeypatch):

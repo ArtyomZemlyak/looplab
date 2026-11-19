@@ -1299,4 +1299,4 @@ These server flags are not experiment Settings and are not pinned to a run snaps
 Quick start requires neither. See [Deployment](deployment.md#what-an-unset-looplab_ui_token-means)
 for open/protected mode, harness credentials and shared deployment boundaries.
 
-| `cross_run_structured_claims` | *(retired)* | Always uses the scope/polarity-safe structured projection; original snapshots containing the old key remain readable without rewriting bytes, new snapshots and the UI omit it, and the v1 calibration identity reserves only its historical fixed digest slot (source, runtime-scope and active-setting checks still apply). |
+Retired key `cross_run_structured_claims`: always uses the structured projection; old snapshots stay readable, new snapshots/UI omit it, and v1 calibration retains its historical digest slot.

@@ -1275,9 +1275,11 @@ class EvalDispatchMixin:
             # Follow its stage cursor so a pending question names the precise
             # command whose extra time the agent is deciding to spend.
             stage_context = {"name": ""}
+            _job_role = getattr(node, "job_role", None) if node is not None else None
             progress_fn = (self._stage_progress_fn(
                 node.id if node is not None else None,
-                node.attempt if node is not None else 0, stages)
+                node.attempt if node is not None else 0, stages,
+                **({"job_role": _job_role} if _job_role else {}))
                 if canary is None else None)
 
             def _progress_with_stage(payload):

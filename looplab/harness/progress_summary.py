@@ -165,6 +165,8 @@ def brief(progress: dict) -> dict:
         result["report_authoring"] = progress["report_authoring"]
     if "agent_activity" in progress:
         result["agent_activity"] = progress["agent_activity"]
+    if "agent_notify" in progress:
+        result["agent_notify"] = progress["agent_notify"]
     if "external_telemetry" in progress:
         result["external_telemetry"] = progress["external_telemetry"]
     if "external_work_state" in progress:

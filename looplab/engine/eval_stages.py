@@ -1110,7 +1110,7 @@ class EvalStagesMixin:
             return key, reason
         return _key
 
-    def _stage_progress_fn(self, node_id, generation, stages=None):
+    def _stage_progress_fn(self, node_id, generation, stages=None, *, job_role=None):
         """The `on_stage_event` callback `runtime/command_eval.py` calls at each stage boundary.
 
         Turns the runtime's layer-free cursor into a registered `phase_progress` beacon, so the
@@ -1138,7 +1138,7 @@ class EvalStagesMixin:
         from looplab.runtime.command_eval import BEACON_OUTCOMES
 
         try:
-            _plan = eval_log_plan(stages or []).roles or {}
+            _plan = eval_log_plan(stages or [], job_role=job_role).roles or {}
             roles = {stage: role for stage, role in _plan.values()}
             # THE SINGLE-COMMAND PATH keys its one role under `None` (there is no stage name to key
             # it by), and the runtime reports that step as `eval`. Bridge the two HERE rather than

@@ -1316,8 +1316,10 @@ def build_router(srv) -> APIRouter:
         if request_agent_token(request):
             srv.agent_activity.observe(rd, result["generation"])
         from looplab.serve.agent_activity import waiting_for_agent
+        from looplab.serve.agent_events import notify_health_for_run
         result["agent_activity"] = srv.agent_activity.snapshot(
             rd, result["generation"], waiting=waiting_for_agent(result))
+        result["agent_notify"] = notify_health_for_run(srv.root, run_id)
         if brief:
             from looplab.harness.progress_summary import brief as compact_progress
             return compact_progress(result)

@@ -205,8 +205,11 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
         except Exception:  # noqa: BLE001 — a tick hiccup cannot disable later observation
             # A transient storage/log read cannot turn an enabled review into an
             # implicit 'continue'. Keep observing; an opened question remains due.
+            # On the post-eval final pass, the evaluation itself has already finished:
+            # record unavailable advisory evidence rather than failing completed GPU work.
             if final_pass:
-                raise  # the final gate must not silently skip a failed observation
+                a.advisory_review_status = "evidence_unavailable"
+                return
             continue
 
 

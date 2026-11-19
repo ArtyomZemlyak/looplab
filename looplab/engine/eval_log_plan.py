@@ -140,7 +140,7 @@ class EvalLogPlan:
     timeouts: dict = field(default_factory=dict)
 
 
-def eval_log_plan(stages) -> EvalLogPlan:
+def eval_log_plan(stages, *, job_role: Optional[str] = None) -> EvalLogPlan:
     """The log plan for a resolved eval pipeline. Pure/deterministic — no I/O — so what the watchdogs
     are allowed to judge is unit-testable without a filesystem.
 
@@ -265,6 +265,10 @@ def eval_log_plan(stages) -> EvalLogPlan:
         # A second writer for the same basename -> unattributable, and unattributable is not judged.
         roles[key] = value if roles.get(key, value) == value else (None, LOG_ROLE_AMBIGUOUS)
 
+    _jr = str(job_role or "").strip().lower()
+    single_role = (LOG_ROLE_SCORE if _jr in ("score", "eval", "audit")
+                   else LOG_ROLE_WORK if _jr in ("prep", "smoke", "gate")
+                   else LOG_ROLE_TRAINING)
     _claim(_log_name_key(_SETUP_LOG), (None, LOG_ROLE_SETUP))
     if names:
         for index, name in enumerate(names):
@@ -274,7 +278,7 @@ def eval_log_plan(stages) -> EvalLogPlan:
                 # must not be able to buy that back by writing `role` on it.
                 role = LOG_ROLE_SCORE
             elif len(names) == 1 and complete:
-                role = LOG_ROLE_TRAINING     # a one-stage pipeline IS the single-command shape
+                role = LOG_ROLE_TRAINING if name in declared_training else single_role
             elif name in declared_training and complete:
                 # DECLARED, not guessed. `complete` for the same reason the one-stage grant needs
                 # it: a pipeline this cannot fully name is a broken resolution, and a broken
@@ -284,7 +288,7 @@ def eval_log_plan(stages) -> EvalLogPlan:
                 role = LOG_ROLE_WORK
             _claim(_log_name_key(f"{name}.log"), (name, role))
     else:
-        _claim(_log_name_key(_SINGLE_COMMAND_LOG), (None, LOG_ROLE_TRAINING))
+        _claim(_log_name_key(_SINGLE_COMMAND_LOG), (None, single_role))
     # The artifacts belong to the declaration only if the declaration actually BOUGHT the role: the
     # positional scorer rule and the `complete` guard both refuse it, and a stage that was refused
     # must not carry a spend condition for an authority it does not hold.

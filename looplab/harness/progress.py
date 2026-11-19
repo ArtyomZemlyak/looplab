@@ -170,11 +170,12 @@ def canary_preflight(rd: Path) -> dict:
 @functools.lru_cache(maxsize=1)
 def runtime_build_info() -> dict:
     """Running LoopLab package version and source checkout commit SHA when readable (no subprocess)."""
-    import looplab
-    version = str(getattr(looplab, "__version__", "unknown"))
+    import sys
+    _pkg = sys.modules.get("looplab")
+    version = str(getattr(_pkg, "__version__", "unknown"))
     head_sha = None
     try:
-        repo_root = Path(looplab.__file__).resolve().parent.parent
+        repo_root = Path(__file__).resolve().parents[2]
         dot_git = repo_root / ".git"
         git_dir = dot_git
         common_dir = dot_git
@@ -281,11 +282,51 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
     withheld = withheld_lifecycles(events)
     activity = Counter(activity_reader(state, nid, withheld=withheld)["status"]
                        for nid in finish_due["pending_nodes"])
+    from looplab.core.models import coerce_node_id
+    from looplab.events.replay import event_generation_binds
+    from looplab.events.types import (
+        EV_EVAL_INVOCATION_CLAIMED,
+        EV_EVAL_INVOCATION_SETTLED,
+        EV_PHASE_PROGRESS,
+        PROGRESS_STAGE_EVAL,
+    )
+    settlement_pending = []
+    for nid in finish_due["pending_nodes"]:
+        node = state.nodes.get(nid)
+        if node is None:
+            continue
+        gen = getattr(node, "attempt", 0)
+        last_inv = None
+        finished_beacon = None
+        for ev in events:
+            ed = ev.data if isinstance(ev.data, dict) else {}
+            if ev.type in (EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED):
+                if coerce_node_id(ed) == nid and event_generation_binds(ed, gen):
+                    last_inv = ev
+                    finished_beacon = None
+            elif (last_inv is not None and last_inv.type == EV_EVAL_INVOCATION_CLAIMED
+                  and ev.type == EV_PHASE_PROGRESS and ed.get("stage") == PROGRESS_STAGE_EVAL
+                  and ed.get("phase") == "stage" and ed.get("status") == "finished"
+                  and coerce_node_id(ed) == nid and event_generation_binds(ed, gen)):
+                idx, total = ed.get("index"), ed.get("total")
+                if isinstance(idx, int) and isinstance(total, int) and total >= 1 and idx == total - 1:
+                    finished_beacon = ev
+        if last_inv is not None and last_inv.type == EV_EVAL_INVOCATION_CLAIMED and finished_beacon is not None:
+            bd = finished_beacon.data if isinstance(finished_beacon.data, dict) else {}
+            settlement_pending.append({
+                "node_id": nid,
+                "generation": gen,
+                "invocation_id": str((last_inv.data or {}).get("invocation_id") or ""),
+                "stage_finished_seq": finished_beacon.seq,
+                "outcome": bd.get("outcome"),
+                "exit_code": bd.get("exit_code"),
+            })
     from looplab.engine.run_lifecycle import engine_liveness
     engine_running = engine_liveness(rd)
     execution = {"engine_running": engine_running,
                  "agent_connection": "not_measured",
                  "task_or_files_amendable": bool(engine_running is False and activity["evaluating"] == 0),
+                 "post_eval_settlement_pending": settlement_pending,
                  "recorded_node_counts": {kind: activity[kind] for kind in
                      ("building", "queued", "evaluating", "pending")}}
     if state.paused and engine_running is True:

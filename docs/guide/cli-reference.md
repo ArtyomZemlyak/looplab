@@ -3414,7 +3414,7 @@ Serve a UI over stdio MCP: `codex mcp add looplab -- looplab harness-mcp`. Prote
 
 ## `agent-notify`
 
-| `[--run-root R] [--command 'ARGV {message}'] [--var K=V] [--debounce S] [--kinds a,b] [--disable] [--clear] [--codex [--thread T]]` | Configure the debounced external-agent wake-up command and inspect its ledger. `--codex` uses `codex queue`; per-run `thread` is set through `PUT /api/runs/{run}/agent-notify`. [Doc 78](../78-external-agent-orchestration-2026-10-14.md) |
+| `[--run-root R] [--command 'ARGV {message}'] [--var K=V] [--debounce S] [--kinds a,b] [--disable] [--clear] [--codex\|--antigravity [--thread T]]` | Configure the debounced external-agent wake-up hook and inspect its ledger (`--codex` uses `codex queue`; `--antigravity` uses `agy --conversation`; per-run `thread` via `PUT /api/runs/{run}/agent-notify`). [Doc 78](../78-external-agent-orchestration-2026-10-14.md) |
 
 ## `agent-events`
 

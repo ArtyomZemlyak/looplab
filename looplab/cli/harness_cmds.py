@@ -180,7 +180,10 @@ def agent_notify(
     codex: bool = typer.Option(False, "--codex", help="Switch on the Codex preset (hook `codex`: "
                                "`codex queue --thread {thread} --message {message}`); each run's "
                                "agent reports its own session as the run's `thread`."),
-    thread: str = typer.Option(None, "--thread", help="With --codex: one Codex session for every run."),
+    antigravity: bool = typer.Option(False, "--antigravity", help="Switch on the Antigravity CLI "
+                                     "preset (hook `antigravity`: `agy --conversation {thread} "
+                                     "--prompt {message}`); each run supplies `thread`."),
+    thread: str = typer.Option(None, "--thread", help="With --codex or --antigravity: default session/conversation id."),
 ) -> None:
     """Configure the command the UI server runs to wake an external agent (operator only).
 
@@ -197,11 +200,21 @@ def agent_notify(
         hook = check_hook_name(hook)
     except ValueError as exc:
         raise CliRefusal(str(exc)) from exc
+    if codex and antigravity:
+        raise CliRefusal("choose either --codex or --antigravity, not both")
     if codex:
         # doc 82 П5: one flag, a fixed argv; the agent supplies its thread per run.
         from looplab.serve.agent_events import CODEX_HOOK, codex_preset
         try:
             write_notify_config(root, codex_preset(thread or None), CODEX_HOOK)
+        except ValueError as exc:
+            raise CliRefusal(str(exc)) from exc
+        typer.echo(json.dumps(notify_status(root), ensure_ascii=False, indent=1))
+        return
+    if antigravity:
+        from looplab.serve.agent_events import ANTIGRAVITY_HOOK, antigravity_preset
+        try:
+            write_notify_config(root, antigravity_preset(thread or None), ANTIGRAVITY_HOOK)
         except ValueError as exc:
             raise CliRefusal(str(exc)) from exc
         typer.echo(json.dumps(notify_status(root), ensure_ascii=False, indent=1))

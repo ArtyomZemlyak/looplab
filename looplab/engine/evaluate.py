@@ -229,6 +229,9 @@ _DURABLE_EVIDENCE_CHARS = 16_000
 # dropped: a missing record is the same "no record" every other failure of it already reads as.
 _FORENSICS_TIMEOUT_S = 30.0
 _FORENSICS_LOG_BYTES = 65536
+# Bound post-evaluator external checkpoint observation/settlement so a hung sidecar or
+# unanswered monitor loop can never stall terminal emission after the subprocess exited.
+_POST_EVAL_WATCH_TIMEOUT_S = 30.0
 
 
 def _attempt_failure_forensics(root, names, snapshot, *, redact, **record) -> Optional[dict]:
@@ -647,6 +650,7 @@ def _durable_orphan_settle_seconds(events, node_id: int, generation: int) -> flo
     # was a SETTLE or a CANARY (crit_v46 L1): a canary runs inside the attempt's clock (`_t0`), so the
     # settle that follows it carries it, and a canary nothing followed is an orphan like a settle.
     open_seconds, open_kind = None, None
+    claim_open, stage_start_ts, claim_stage_seconds = False, None, 0.0
     for e in events or []:
         d = e.data if isinstance(e.data, Mapping) else {}
         if e.type in (EV_EVAL_INVOCATION_SETTLED, EV_EVAL_CANARY_STARTED, EV_EVAL_CANARY_FINISHED,
@@ -654,6 +658,9 @@ def _durable_orphan_settle_seconds(events, node_id: int, generation: int) -> flo
             if not _durable_row_belongs(d, node_id, generation):
                 continue
             if e.type == EV_EVAL_INVOCATION_CLAIMED:
+                if claim_open and claim_stage_seconds > 0:
+                    spent += claim_stage_seconds
+                claim_open, stage_start_ts, claim_stage_seconds = True, None, 0.0
                 # WHOSE canary is open at a claim is on the claim (`canary_ran`, crit_v57 M1/L1).
                 # THIS attempt's own: its settle is measured from `_t0` and carries it, so the window
                 # stays open. None of its own: the open canary is an earlier process's, inside no
@@ -668,6 +675,7 @@ def _durable_orphan_settle_seconds(events, node_id: int, generation: int) -> flo
                     spent += open_seconds
                     open_seconds, open_kind = None, None
             elif e.type == EV_EVAL_INVOCATION_SETTLED:
+                claim_open, stage_start_ts, claim_stage_seconds = False, None, 0.0
                 if open_kind == "settle":
                     spent += open_seconds
                 open_seconds, open_kind = _positive_seconds(d.get("eval_seconds")), "settle"
@@ -676,9 +684,13 @@ def _durable_orphan_settle_seconds(events, node_id: int, generation: int) -> flo
                 # left uncarried never will be. A failed canary claims no invocation, so without this
                 # its carrying row closed an OLDER orphan settle's window (crit_v46 L1 A, driven: a
                 # 100 s orphan, a failed 2 s canary withheld, a reset — 2 s charged).
-                if not d.get("retry") and open_seconds is not None:
-                    spent += open_seconds
-                    open_seconds, open_kind = None, None
+                if not d.get("retry"):
+                    if claim_open and claim_stage_seconds > 0:
+                        spent += claim_stage_seconds
+                    claim_open, stage_start_ts, claim_stage_seconds = False, None, 0.0
+                    if open_seconds is not None:
+                        spent += open_seconds
+                        open_seconds, open_kind = None, None
             else:
                 # Held OPEN until a row carries it — its attempt's settle, an `after_canary` or
                 # `decide_repair` withhold, a repair row, the terminal. A passed canary whose full
@@ -687,12 +699,23 @@ def _durable_orphan_settle_seconds(events, node_id: int, generation: int) -> flo
                 seconds = _positive_seconds(d.get("eval_seconds"))
                 open_seconds = (open_seconds or 0.0) + seconds if open_kind == "canary" else seconds
                 open_kind = "canary"
-        elif open_seconds is not None and (
+        elif (claim_open and e.type == EV_PHASE_PROGRESS
+              and d.get("stage") == PROGRESS_STAGE_EVAL and d.get("phase") == "stage"
+              and _durable_row_belongs(d, node_id, generation)):
+            status = d.get("status")
+            if status == "started" and isinstance(e.ts, (int, float)):
+                stage_start_ts = float(e.ts)
+            elif status == "finished":
+                if stage_start_ts is not None and isinstance(e.ts, (int, float)):
+                    claim_stage_seconds += max(0.0, float(e.ts) - stage_start_ts)
+                stage_start_ts = None
+        elif (open_seconds is not None or claim_open) and (
                 _carries_settle(e, node_id, generation)
                 or (open_kind == "canary" and e.type == EV_EVAL_ATTEMPT_WITHHELD
                     and d.get("at") == "after_canary" and _durable_row_belongs(d, node_id, generation))):
             open_seconds, open_kind = None, None
-    return spent + (open_seconds or 0.0)
+            claim_open, stage_start_ts, claim_stage_seconds = False, None, 0.0
+    return spent + (open_seconds or 0.0) + (claim_stage_seconds if claim_open else 0.0)
 
 
 def _durable_prior_seconds(events, node_id: int, generation: int) -> float:
@@ -747,8 +770,10 @@ def abandoned_lifecycle_charges(events, state) -> list:
             continue
         if e.type in (EV_NODE_EVALUATED, EV_NODE_FAILED):
             terminals.setdefault(node_id, []).append(d)
-        elif e.type in (EV_NODE_REPAIRED, EV_DEPS_INSTALLED, EV_EVAL_ATTEMPT_WITHHELD,
-                        EV_EVAL_INVOCATION_SETTLED, EV_EVAL_CANARY_FINISHED):
+        elif (e.type in (EV_NODE_REPAIRED, EV_DEPS_INSTALLED, EV_EVAL_ATTEMPT_WITHHELD,
+                         EV_EVAL_INVOCATION_SETTLED, EV_EVAL_CANARY_FINISHED)
+              or (e.type == EV_PHASE_PROGRESS and d.get("stage") == PROGRESS_STAGE_EVAL
+                  and d.get("phase") == "stage" and d.get("status") == "finished")):
             generation = coerce_node_id({"node_id": d.get("generation")})
             if generation is not None and generation >= 0:
                 spent.add((node_id, generation))
@@ -916,12 +941,52 @@ def settled_ok_awaiting_terminal(events, node_id: int, generation: int):
         if e.type == EV_EVAL_INVOCATION_CLAIMED:
             claim_ts[str(d.get("invocation_id") or "")] = float(e.ts)
         last = e
-    if last is None or last.type != EV_EVAL_INVOCATION_SETTLED:
+    if last is None:
         return None
+    if last.type == EV_EVAL_INVOCATION_SETTLED:
+        d = last.data or {}
+        if d.get("outcome") != "ok" or not d.get("invocation_id"):
+            return None
+        return claim_ts.get(str(d["invocation_id"])), last.seq, d
+    # Post-stage-beacon / pre-settle window: the single-command subprocess exited 0 (`phase_progress`
+    # stage="eval", phase="stage", status="finished", outcome="ok", exit_code=0), and the engine died
+    # in post-eval observation/settlement before appending `eval_invocation_settled`. Recoverable
+    # through workdir log verification when no later lifecycle mutation intervened.
     d = last.data or {}
-    if d.get("outcome") != "ok" or not d.get("invocation_id"):
+    inv_id = str(d.get("invocation_id") or "")
+    if not inv_id:
         return None
-    return claim_ts.get(str(d["invocation_id"])), last.seq, d
+    beacon = None
+    for e in events or []:
+        if e.seq <= last.seq:
+            continue
+        ed = e.data if isinstance(e.data, Mapping) else {}
+        if e.type in (EV_NODE_EVALUATED, EV_NODE_FAILED):
+            if coerce_node_id(ed) == node_id and event_generation_binds(ed, generation, legacy_attempt=True):
+                return None
+            continue
+        if e.type in (EV_NODE_RESET, EV_NODE_ABORT):
+            if coerce_node_id(ed) == node_id and event_generation_binds(ed, generation):
+                return None
+            continue
+        if not _durable_row_belongs(ed, node_id, generation):
+            continue
+        if e.type in (EV_NODE_REPAIRED, EV_DEPS_INSTALLED, EV_EVAL_ATTEMPT_WITHHELD):
+            return None
+        if (e.type == EV_PHASE_PROGRESS and ed.get("stage") == PROGRESS_STAGE_EVAL
+                and ed.get("phase") == "stage" and ed.get("status") == "finished"):
+            if (ed.get("outcome") == "ok" and ed.get("exit_code") == 0
+                    and ed.get("name") == "eval" and ed.get("index") == 0 and ed.get("total") == 1):
+                beacon = e
+            else:
+                return None
+    if beacon is None:
+        return None
+    return claim_ts.get(inv_id), beacon.seq, {
+        "node_id": node_id, "generation": generation,
+        "attempt": d.get("attempt", 0), "invocation_id": inv_id,
+        "outcome": "ok", "_from_stage_beacon": True,
+    }
 
 
 def _host_contract_refused(res, stages) -> bool:
@@ -1304,7 +1369,8 @@ from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_IN
                                   EV_FULL_RETRAIN_CHARGED, EV_NODE_ABORT,
                                   EV_NODE_EVAL_STARTED,
                                   EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
-                                  EV_NODE_RESET, EV_PAUSE, EV_PROXY_SCORED,
+                                  EV_NODE_RESET, EV_PAUSE, EV_PHASE_PROGRESS, EV_PROXY_SCORED,
+                                  PROGRESS_STAGE_EVAL,
                                   EV_TRAIN_MONITOR_ALERT,
                                   EV_REPAIR_CRITIC_VERDICT,
                                   EV_EFFECTIVE_TRAIN_BATCH,
@@ -3679,6 +3745,7 @@ Historical incident details omitted.
                         if sig is PHASE_SETTLED:
                             break
                         # loop -> re-run the eval with the corrected code (reusing earlier stages when safe)
+                    self._yield_devices_after_eval(a)
                     await self._eval_write_terminal(a)
                     # The operator's copy-out of this workdir (`eval.artifact_sync`), AFTER the
                     # terminal and in its own thread: it never holds this slot or moves the node.
@@ -3761,6 +3828,18 @@ Historical incident details omitted.
                 await self._land_terminal_before_ceiling(a, exc)
                 raise
             await self._contain_eval_crash(node_id, a.generation, exc, a=a)
+
+    def _yield_devices_after_eval(self, a: "EvalAttempt") -> None:
+        """Return physical GPUs (and the host GPU lease when last) as soon as subprocess work ends.
+
+        Post-evaluator checkpoint settlement, activation checks, trust scans and terminal commits are
+        pure CPU/IO/LLM work; holding physical GPUs across them stranded multi-GPU nodes at 0%
+        utilization whenever post-eval settlement stalled. If a subsequent attempt ever runs (e.g. a
+        dependency retry), `_reclaim_devices_for_attempt` re-acquires `yielded_gpus` before launch.
+        """
+        yield_fn = getattr(self, "_yield_eval_devices", None)
+        if a.generation >= 0 and callable(yield_fn) and yield_fn(a.node_id, a.generation):
+            a.sp.set("devices_yielded_after_eval", True)
 
     def _yield_devices_for_repair(self, a: "EvalAttempt") -> None:
         """Return devices and the admitted physical slot while repair talks to an LLM.
@@ -4571,17 +4650,22 @@ Historical incident details omitted."""
         a._superseded_marker = a.workdir / ".looplab-superseded"
         a._manifest_stamp = a.workdir / ".looplab-manifest"
         res, source = None, None
+        _artifact = getattr(a.node, "kind", None) == "artifact"
         if settled_attempt != a.attempt:
             # An `ok` is always its chain's last attempt, so a ledger that has moved past it means
             # the log holds something this rule does not understand: re-run rather than guess.
             reason = f"attempt_mismatch:settled={settled_attempt},ledger={a.attempt}"
         else:
-            res, reason = _settled.result_from_record(settled.get("result"))
+            res, reason = _settled.result_from_record(settled.get("result"), artifact=_artifact)
             source = _settled.SOURCE_SETTLE_RECORD
             if res is None:
                 record_reason = reason
                 res, reason = await anyio.to_thread.run_sync(
-                    self._settled_workdir_evidence, a, claim_ts, settle_seq)
+                    functools.partial(
+                        self._settled_workdir_evidence, a, claim_ts, settle_seq,
+                        from_stage_beacon=bool(settled.get("_from_stage_beacon")),
+                    )
+                )
                 source = _settled.SOURCE_WORKDIR_LOG
                 reason = f"{record_reason}; {reason}" if res is None else ""
         _invocation = str(settled.get("invocation_id"))
@@ -4622,12 +4706,14 @@ Historical incident details omitted."""
         start_artifact_sync(self, a.node_id, a.generation)
         return PHASE_RETURN
 
-    def _settled_workdir_evidence(self, a: "EvalAttempt", claim_ts, settle_seq: int):
+    def _settled_workdir_evidence(self, a: "EvalAttempt", claim_ts, settle_seq: int,
+                                  *, from_stage_beacon: bool = False):
         """Rule 2 of `engine/settled_recovery.py`: the settled invocation's captured output, read
         from the node workdir under the current spec — only while nothing says that workdir has
         been rebuilt since. `(RunResult | None, reason)`; never raises."""
         _spec = getattr(self, "_eval_spec", None)
-        if not isinstance(_spec, dict) or not isinstance(_spec.get("metric"), dict):
+        _artifact = getattr(a.node, "kind", None) == "artifact"
+        if not isinstance(_spec, dict) or (not _artifact and not isinstance(_spec.get("metric"), dict)):
             return None, "no_command_eval_spec"      # the toy/solution.py path keeps no eval.log
         if claim_ts is None:
             return None, "no_claim_row"
@@ -4643,10 +4729,17 @@ Historical incident details omitted."""
             return None, "workdir_unreadable"
         if not a.workdir_matches(a.node):
             return None, "workdir_manifest_mismatch"
+        if from_stage_beacon and getattr(self, "_activation_check", "graded") != "off":
+            from looplab.engine.activation import log_entries, read_manifest, read_markers
+            _mode = getattr(self, "_activation_check", "graded")
+            if (bool(read_markers(a.workdir)) if _mode == "strict"
+                    else bool(log_entries(read_manifest(a.workdir)))):
+                return None, "unverified_activation_manifest"
         return _settled.result_from_workdir_log(
             a.workdir, getattr(self, "_eval_spec", None), since=float(claim_ts),
             pipeline_stages=self._resolved_stages(a.node, a.workdir),
-            enforce_drift=(getattr(self, "eval_trust_mode", "ratify_freeze") == "ratify_freeze_drift"))
+            enforce_drift=(getattr(self, "eval_trust_mode", "ratify_freeze") == "ratify_freeze_drift"),
+            artifact=_artifact)
 
     def _protocol_inputs_changed_since(self, a: "EvalAttempt", seq: int) -> bool:
         """Whether a task/files amendment landed after a completed stage."""
@@ -5048,13 +5141,16 @@ Historical incident details omitted."""
         # `*.log` is `setup.log` during a pip install and `score.log` after the training has
         # already SUCCEEDED. `_resolved_stages` re-resolves exactly what `_run_eval` will run
         # ([] = the single-command path, whose `eval.log` IS the training log).
-        a._log_plan = eval_log_plan(self._resolved_stages(a.node, a.workdir)) if _watching_logs else None
+        _node_job_role = getattr(a.node, "job_role", None)
+        a._log_plan = (eval_log_plan(self._resolved_stages(a.node, a.workdir), job_role=_node_job_role)
+                       if _watching_logs else None)
         # …and WHICH logs that cursor may cut: only the ones the ENGINE appends to, named from the
         # same resolved pipeline this attempt runs. A log the candidate writes itself may be
         # rewritten in place with the same bytes at the old boundary, and the cursor then dropped
         # the marker this attempt really printed (crit_v55 A1, `activation._fresh_logs`).
         a._marker_engine_logs = (
-            frozenset((a._log_plan or eval_log_plan(self._resolved_stages(a.node, a.workdir))).roles)
+            frozenset((a._log_plan or eval_log_plan(
+                self._resolved_stages(a.node, a.workdir), job_role=_node_job_role)).roles)
             if _declares_markers else None)
         # Mid-eval intervention: a watcher polls while the eval runs in a worker thread. An
         # exact node lifecycle mutation or operator drop of THIS node's Card sets the cancel
@@ -5250,22 +5346,30 @@ Historical incident details omitted."""
         if await self._settle_artifact_refusal(a):
             return PHASE_RETURN
         from looplab.engine.external_watch import attempt_failed as _attempt_failed
-        if (self.external_harness and getattr(self, "_eval_spec", None) and not a._seen.get("kind")
-                # A FAILED evaluation is not asked about after the fact (doc 78 §4): the question
-                # would only delay its terminal while it waits for a moot answer.
-                and not _attempt_failed(getattr(a, "res", None), a.node)):
-            # A short command evaluation can finish before the first live-monitor tick.
-            # Inspect its final attributed log once so enabled monitoring cannot vanish merely
-            # because the configured cadence was longer than the evaluation. A phase already
-            # observed live is not questioned twice. This still never starts an internal model.
-            from looplab.engine.external_watch import observe_external_eval
-            for phase, enabled in (("train_monitor", getattr(self, "_train_monitor", False)),
-                                   ("asha_live", getattr(self, "_asha_live", False))):
-                if enabled:
-                    await observe_external_eval(self, a, threading.Event(), phase, final_pass=True)
-        if self.external_harness and a._live_questions:
-            from looplab.engine.external_watch import settle_external_observations
-            await settle_external_observations(self, a)
+        _failed_attempt = _attempt_failed(
+            getattr(a, "res", None), a.node,
+            objective_key=getattr(a.state, "objective_key", None),
+            run_direction=getattr(a.state, "direction", None),
+        )
+        if self.external_harness or not _failed_attempt:
+            self._yield_devices_after_eval(a)
+        if self.external_harness:
+            with anyio.move_on_after(_POST_EVAL_WATCH_TIMEOUT_S) as _post_watch:
+                if getattr(self, "_eval_spec", None) and not a._seen.get("kind") and not _failed_attempt:
+                    # A short command evaluation can finish before the first live-monitor tick.
+                    # Inspect its final attributed log once so enabled monitoring cannot vanish merely
+                    # because the configured cadence was longer than the evaluation. A phase already
+                    # observed live is not questioned twice. This still never starts an internal model.
+                    from looplab.engine.external_watch import observe_external_eval
+                    for phase, enabled in (("train_monitor", getattr(self, "_train_monitor", False)),
+                                           ("asha_live", getattr(self, "_asha_live", False))):
+                        if enabled:
+                            await observe_external_eval(self, a, threading.Event(), phase, final_pass=True)
+                if a._live_questions:
+                    from looplab.engine.external_watch import settle_external_observations
+                    await settle_external_observations(self, a)
+            if _post_watch.cancelled_caught:
+                a.advisory_review_status = "evidence_unavailable"
         return PHASE_NEXT
 
     async def _eval_settle_outcome(self, a: "EvalAttempt") -> str:

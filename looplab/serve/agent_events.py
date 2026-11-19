@@ -458,6 +458,12 @@ def notify_hooks(root) -> dict[str, dict]:
 # thread is skipped, not failed: there is nobody to queue the message for.
 CODEX_HOOK = "codex"
 CODEX_PRESET_COMMAND = ("codex", "queue", "--thread", "{thread}", "--message", "{message}")
+ANTIGRAVITY_HOOK = "antigravity"
+ANTIGRAVITY_PRESET_COMMAND = ("agy", "--conversation", "{thread}", "--prompt", "{message}")
+_PRESET_COMMANDS = {
+    "codex": CODEX_PRESET_COMMAND,
+    "antigravity": ANTIGRAVITY_PRESET_COMMAND,
+}
 # After a delivery that exited 0, LoopLab waits this long for the agent's next request to the run;
 # with none it sends ONE reminder, then records `no_reaction`. Exit 0 proves the message was handed
 # over, not that the agent woke (`codex queue` only queues it for the session).
@@ -472,14 +478,22 @@ def codex_preset(thread: Optional[str] = None) -> dict:
     return body
 
 
+def antigravity_preset(thread: Optional[str] = None) -> dict:
+    """The notify body the `--antigravity` flag writes for the `antigravity` hook."""
+    body = {"command": list(ANTIGRAVITY_PRESET_COMMAND), "preset": "antigravity", "enabled": True}
+    if thread:
+        body["vars"] = {"thread": thread}
+    return body
+
+
 def validate_notify_config(body: dict) -> dict:
     """The one validator for a hook configuration (CLI, owner API). Raises ValueError."""
     if not isinstance(body, dict):
         raise ValueError("notify config must be an object")
     preset = body.get("preset")
-    if preset is not None and (preset != "codex"
-                               or list(body.get("command") or []) != list(CODEX_PRESET_COMMAND)):
-        raise ValueError("preset 'codex' takes its fixed command; no other preset exists")
+    if preset is not None and (preset not in _PRESET_COMMANDS
+                               or list(body.get("command") or []) != list(_PRESET_COMMANDS[preset])):
+        raise ValueError("preset 'codex' or 'antigravity' takes its fixed command; no other preset exists")
     command = body.get("command")
     if isinstance(command, str):
         import shlex
@@ -976,7 +990,10 @@ class AgentEventPump:
         """Is this pending question ROUTINE under the agent's declared monitor rules?
 
 Historical incident details omitted."""
-        from looplab.harness.checkpoints import rule_previous_progress
+        from looplab.harness.checkpoints import (
+            rule_previous_progress,
+            rule_previous_progress_by_rule,
+        )
         from looplab.harness.monitor_rules import evaluate, read_rules
         rules = read_rules(rd)
         if not rules:
@@ -992,14 +1009,22 @@ Historical incident details omitted."""
         known = [p for p in (rule_previous_progress(before, question),
                              self._rule_progress.get(lifecycle)) if p is not None]
         previous = max(known) if known else None
+        previous_by_rule = dict(rule_previous_progress_by_rule(before, question))
+        for key, val in self._rule_progress.items():
+            if len(key) == 5 and key[:4] == lifecycle and isinstance(val, (int, float)):
+                rid = key[4]
+                previous_by_rule[rid] = max(val, previous_by_rule[rid]) if rid in previous_by_rule else val
         try:
-            verdict = evaluate(rules, question, previous_progress=previous)
+            verdict = evaluate(rules, question, previous_progress=previous,
+                               previous_by_rule=previous_by_rule)
         except Exception:  # noqa: BLE001 — an unevaluable rule leaves the question to the agent
             verdict = None
         if verdict is not None:
             progress = (verdict.get("facts") or {}).get("progress")
             if isinstance(progress, (int, float)):
                 self._rule_progress[lifecycle] = progress
+                if isinstance(verdict.get("rule_id"), str) and verdict["rule_id"]:
+                    self._rule_progress[(*lifecycle, verdict["rule_id"])] = progress
         self._routine_seen[cid] = verdict is not None
         if len(self._routine_seen) > 4096:
             for key in list(self._routine_seen)[:1024]:
@@ -1137,6 +1162,8 @@ Historical incident details omitted."""
         for row in rows:
             run_cfg = read_run_notify(self.root / row["run_id"], hook) if row.get("run_id") else {}
             merged = {**config.get("vars", {}), **run_cfg.get("vars", {})}
+            if "thread" not in merged and merged.get("conversation"):
+                merged["thread"] = merged["conversation"]
             if run_cfg.get("enabled") is False or (variables is not None and merged != variables):
                 return None
             variables = merged
@@ -1333,6 +1360,8 @@ Historical incident details omitted."""
             if run_cfg.get("enabled") is False:
                 continue
             variables = {**config.get("vars", {}), **run_cfg.get("vars", {})}
+            if "thread" not in variables and variables.get("conversation"):
+                variables["thread"] = variables["conversation"]
             gkey = json.dumps(variables, sort_keys=True)
             groups.setdefault(gkey, []).append(row)
             merged_vars[gkey] = variables
@@ -1340,16 +1369,17 @@ Historical incident details omitted."""
         failed_before = int(delivery.get("failed", 0))
         all_ok, record = True, None
         for gkey, grows in groups.items():
-            if config.get("preset") == "codex" and not merged_vars[gkey].get("thread"):
-                # Nobody to wake: the run's agent has not reported its Codex session (doc 82 П5).
+            preset_name = config.get("preset")
+            if preset_name in _PRESET_COMMANDS and not merged_vars[gkey].get("thread"):
+                # Nobody to wake: the run's agent has not reported its session/conversation id.
                 if attempts == 1:
                     _append_ledger(self.root, {
                         "ts": now, "attempt": 0, "status": "skipped",
                         "event_ids": [r["id"] for r in grows],
                         "runs": sorted({r.get("run_id") for r in grows if r.get("run_id")}),
                         "kinds": sorted({r["kind"] for r in grows}),
-                        "error": "no thread: the agent sets it with PUT /api/runs/{run}/agent-notify "
-                                 '{"hook": "codex", "vars": {"thread": "<session id>"}}',
+                        "error": ("no thread: the agent sets it with PUT /api/runs/{run}/agent-notify "
+                                  f'{{"hook": "{preset_name}", "vars": {{"thread": "<session id>"}}}}'),
                         **({"hook": hook} if hook != DEFAULT_HOOK else {})})
                 continue
             message = compose_message(grows, limit_chars=int(config.get("message_chars", 1500)),
@@ -1468,6 +1498,45 @@ def notify_status(root) -> dict:
             "hooks": hooks, "ledger": ledger_rows(root, limit=50), "reaction_pending": pending_view,
             "reaction_pending_readable": pending_healthy,
             "reaction_pending_meaning": "A pending reminder can remain unsent if its outbox rows or original hook configuration are unavailable."}
+
+
+def notify_health_for_run(root, run_id: str) -> dict:
+    """Compact, non-secret wake-up health summary for `harness-progress`."""
+    hooks = notify_hooks(root)
+    included = sorted(name for name, cfg in hooks.items()
+                      if cfg.get("runs") is None or run_id in (cfg.get("runs") or []))
+    enabled_hooks = []
+    missing_thread_hooks = []
+    rd = Path(root) / run_id
+    for name in included:
+        cfg = hooks[name]
+        run_cfg = read_run_notify(rd, name)
+        if not cfg.get("enabled", True) or run_cfg.get("enabled") is False:
+            continue
+        enabled_hooks.append(name)
+        merged = {**(cfg.get("vars") or {}), **(run_cfg.get("vars") or {})}
+        if cfg.get("preset") in _PRESET_COMMANDS and not (merged.get("thread") or merged.get("conversation")):
+            missing_thread_hooks.append(name)
+    recent = ledger_rows(root, limit=1, run_id=run_id)
+    latest = recent[0] if recent else None
+    latest_status = latest.get("status") if isinstance(latest, dict) else None
+    latest_hook = (latest.get("hook") or DEFAULT_HOOK) if isinstance(latest, dict) else None
+    warning = None
+    if not enabled_hooks:
+        warning = "no enabled agent-notify hook covers this run"
+    elif missing_thread_hooks:
+        warning = f"preset hook(s) {missing_thread_hooks} have no session thread configured for this run"
+    elif latest_status in ("no_reaction", "failed", "abandoned", "skipped"):
+        detail = _clip((latest or {}).get("error") or "agent did not react", 200)
+        warning = f"latest wake-up delivery status on hook {latest_hook!r} is {latest_status!r}: {detail}"
+    return {
+        "included_hooks": included,
+        "enabled_hooks": enabled_hooks,
+        "missing_thread_hooks": missing_thread_hooks,
+        "latest_delivery_status": latest_status,
+        "latest_delivery_hook": latest_hook,
+        "warning": warning,
+    }
 
 
 def run_event_summary(root, run_id: str, *, limit: int = 20) -> dict:
